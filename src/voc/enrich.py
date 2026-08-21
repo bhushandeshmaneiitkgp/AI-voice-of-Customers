@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,12 +44,8 @@ from voc.enrichment_schemas import (
     validate_against_taxonomy,
     verify_grounding,
 )
-from voc.llm import (
-    DEFAULT_REVIEWS_PER_REQUEST,
-    build_request_params,
-    extract_json_text,
-    describe_usage,
-)
+from voc.llm import DEFAULT_REVIEWS_PER_REQUEST
+from voc.providers import LLMProvider, ProviderError, normalise_usage
 from voc.prompts import build_system_prompt, build_user_message
 from voc.taxonomy import Taxonomy
 
@@ -227,17 +224,20 @@ def enrich_sync(
     frame: pd.DataFrame,
     taxonomy: Taxonomy,
     profile: ModelProfile,
-    client: Any,
+    provider: LLMProvider,
     reviews_per_request: int = DEFAULT_REVIEWS_PER_REQUEST,
     cache: EnrichmentCache | None = None,
     progress: Callable[[int, int], None] | None = None,
     retry_missing: bool = True,
     effort: str | None = None,
+    max_concurrency: int = 1,
 ) -> EnrichmentResult:
-    """Enrich reviews with immediate API calls.
+    """Enrich reviews with live API calls, optionally concurrent.
 
-    Used for samples, smoke tests, and evaluation runs where waiting on a batch
-    would slow the loop down. The full corpus goes through ``enrich_batch``.
+    This is the only path for providers without a batch endpoint, which is
+    every open-source option. ``max_concurrency`` above 1 runs groups in a
+    thread pool; the work is I/O-bound waiting, so threads are sufficient and
+    avoid making the whole pipeline async for one call site.
     """
     system_prompt = build_system_prompt(taxonomy)
     schema = build_response_schema(taxonomy)
@@ -259,35 +259,61 @@ def enrich_sync(
         pending = frame[frame["review_id"].isin(uncached)]
 
     groups = list(chunk_reviews(pending, reviews_per_request))
-    for index, group in enumerate(groups, start=1):
-        params = build_request_params(
-            profile, system_prompt, build_user_message(group), schema, effort=effort
-        )
+
+    def run_group(group: pd.DataFrame) -> tuple[pd.DataFrame, EnrichmentResult, dict[str, int]]:
+        """Call the provider for one group. Errors become issues, never crashes.
+
+        Returns the group alongside its result so the caller can reconcile even
+        when responses arrive out of order under concurrency.
+        """
         try:
-            message = client.messages.create(**params)
+            completion = provider.complete(
+                profile, system_prompt, build_user_message(group), schema, effort=effort
+            )
         except Exception as exc:  # noqa: BLE001 - recorded, run continues
             logger.error("Request failed for %d review(s): %s", len(group), exc)
-            result.failed_review_ids.extend(group["review_id"].tolist())
-            result.issues.append(
-                ValidationIssue(
-                    review_id="<group>", kind="api_error", detail=str(exc)[:300]
-                )
+            failure = EnrichmentResult(
+                failed_review_ids=group["review_id"].tolist(),
+                issues=[
+                    ValidationIssue(
+                        review_id="<group>", kind="api_error", detail=str(exc)[:300]
+                    )
+                ],
             )
-            continue
+            return group, failure, {}
 
-        result.requests_made += 1
-        for key, value in describe_usage(message).items():
-            result.usage[key] = result.usage.get(key, 0) + value
+        group_result = parse_and_validate(completion.text, group, taxonomy)
+        group_result.requests_made = 1
+        return group, group_result, completion.usage
 
-        group_result = parse_and_validate(extract_json_text(message), group, taxonomy)
+    def absorb(group_result: EnrichmentResult, usage: dict[str, int]) -> None:
         result.merge(group_result)
-
+        for key, value in usage.items():
+            result.usage[key] = result.usage.get(key, 0) + value
         if cache is not None:
             for enrichment in group_result.enrichments:
                 cache.put(cache_key(enrichment.review_id, profile), enrichment)
 
-        if progress:
-            progress(index, len(groups))
+    if max_concurrency > 1 and len(groups) > 1:
+        # Providers without a batch endpoint need concurrency to finish in
+        # reasonable time: 924 serial requests is over an hour, eight at a time
+        # is minutes. Requests are independent, so a thread pool is enough --
+        # this is I/O-bound waiting, not computation.
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+            futures = [pool.submit(run_group, group) for group in groups]
+            for future in as_completed(futures):
+                _, group_result, usage = future.result()
+                absorb(group_result, usage)
+                completed += 1
+                if progress:
+                    progress(completed, len(groups))
+    else:
+        for index, group in enumerate(groups, start=1):
+            _, group_result, usage = run_group(group)
+            absorb(group_result, usage)
+            if progress:
+                progress(index, len(groups))
 
     # A review the model skipped in a group usually succeeds on its own, so
     # retry individually rather than losing it.
@@ -301,11 +327,12 @@ def enrich_sync(
                 retry_frame,
                 taxonomy,
                 profile,
-                client,
+                provider,
                 reviews_per_request=1,
                 cache=cache,
                 retry_missing=False,
                 effort=effort,
+                max_concurrency=max_concurrency,
             )
             result.merge(retry_result)
 
@@ -321,7 +348,7 @@ def submit_batch(
     frame: pd.DataFrame,
     taxonomy: Taxonomy,
     profile: ModelProfile,
-    client: Any,
+    provider: LLMProvider,
     reviews_per_request: int = DEFAULT_REVIEWS_PER_REQUEST,
     effort: str | None = None,
 ) -> tuple[str, dict[str, list[str]]]:
@@ -342,14 +369,14 @@ def submit_batch(
     for index, group in enumerate(chunk_reviews(frame, reviews_per_request)):
         custom_id = f"group-{index:05d}"
         group_map[custom_id] = group["review_id"].tolist()
-        params = build_request_params(
+        params = provider.build_params(
             profile, system_prompt, build_user_message(group), schema, effort=effort
         )
         requests.append(
             Request(custom_id=custom_id, params=MessageCreateParamsNonStreaming(**params))
         )
 
-    batch = client.messages.batches.create(requests=requests)
+    batch = provider.client.messages.batches.create(requests=requests)
     logger.info(
         "Submitted batch %s: %d requests covering %d reviews",
         batch.id, len(requests), len(frame),
@@ -358,7 +385,7 @@ def submit_batch(
 
 
 def poll_batch(
-    client: Any,
+    provider: LLMProvider,
     batch_id: str,
     interval_seconds: int = 60,
     timeout_seconds: int = 24 * 3600,
@@ -367,7 +394,7 @@ def poll_batch(
     """Block until a batch finishes. Most complete well inside an hour."""
     started = time.monotonic()
     while True:
-        batch = client.messages.batches.retrieve(batch_id)
+        batch = provider.client.messages.batches.retrieve(batch_id)
         if on_poll:
             on_poll(batch)
         if batch.processing_status == "ended":
@@ -381,7 +408,7 @@ def poll_batch(
 
 
 def collect_batch_results(
-    client: Any,
+    provider: LLMProvider,
     batch_id: str,
     frame: pd.DataFrame,
     group_map: dict[str, list[str]],
@@ -397,7 +424,7 @@ def collect_batch_results(
     result = EnrichmentResult()
     by_id = frame.set_index("review_id")
 
-    for entry in client.messages.batches.results(batch_id):
+    for entry in provider.client.messages.batches.results(batch_id):
         review_ids = group_map.get(entry.custom_id, [])
         if not review_ids:
             result.issues.append(
@@ -424,11 +451,11 @@ def collect_batch_results(
             continue
 
         result.requests_made += 1
-        for key, value in describe_usage(entry.result.message).items():
+        for key, value in normalise_usage(getattr(entry.result.message, "usage", None)).items():
             result.usage[key] = result.usage.get(key, 0) + value
 
         group_result = parse_and_validate(
-            extract_json_text(entry.result.message), requested, taxonomy
+            provider.extract_text(entry.result.message), requested, taxonomy
         )
         result.merge(group_result)
 

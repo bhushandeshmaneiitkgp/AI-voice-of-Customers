@@ -6,7 +6,7 @@ product opportunities, RICE prioritisation, and experiment plans.
 
 > **Status: Phases 1–3 of 10 complete.** Data foundation, the corpus-derived
 > product taxonomy, full exploratory analysis, and the AI enrichment pipeline are
-> built and verified, with **226 passing tests**. RAG, LangGraph orchestration, and
+> built and verified, with **257 passing tests**. RAG, LangGraph orchestration, and
 > the Streamlit UI are scheduled — see [Roadmap](#roadmap).
 >
 > Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
@@ -151,7 +151,15 @@ python scripts/02_discover_taxonomy.py
 python scripts/03_run_eda.py
 ```
 
-Phase 3 needs an API key. Smoke-test on 20 reviews first:
+Phase 3 needs an API key for whichever provider your model uses — by default an
+[OpenRouter](https://openrouter.ai/keys) key in `.env`. See every model and its cost
+for this corpus without spending anything:
+
+```bash
+python scripts/04_run_enrichment.py --all --dry-run
+```
+
+Then smoke-test on 20 reviews (about one cent):
 
 ```bash
 python scripts/04_run_enrichment.py --sample 20
@@ -270,13 +278,50 @@ directions. A skipped review is retried individually; an id that was never reque
 is discarded. Without that check, one omission would silently shift every label in the
 group onto the wrong rows.
 
+### One adapter reaches every open-source provider
+
+Enrichment runs on **open-weight models via OpenRouter** by default. The key fact
+that makes this cheap to support: OpenRouter, Groq, Together, Fireworks, DeepSeek,
+Ollama and vLLM all speak the **OpenAI chat-completions** wire format. So there are
+two adapters, not seven — and switching between those providers is a `base_url`
+change in `config/models.yaml`, not an integration.
+
+```
+voc/providers/base.py              Protocol: complete(...) -> (text, usage)
+voc/providers/anthropic_provider.py    first-party SDK + native Batch API
+voc/providers/openai_compatible.py     OpenRouter / Groq / DeepSeek / Ollama / vLLM
+```
+
+Everything that makes enrichment trustworthy sits **above** that boundary and is
+identical for every provider. That is what makes a cross-provider benchmark
+meaningful: the only thing that varies between two runs is the model. Tests assert
+both adapters receive a byte-identical system prompt and JSON schema.
+
+Cost for the full 4,620-review corpus spans **62×**:
+
+| Model | Provider | Cost | Structured output |
+|---|---|---|---|
+| `ollama` (local Llama 3.3) | local | **$0.00** | schema |
+| `llama70b` *(default)* | openrouter | **$0.90** | schema |
+| `gptoss` / `qwen72b` | openrouter | ~$1.05 | schema |
+| `deepseek` | openrouter | $2.58 | json only |
+| `haiku` | anthropic | $5.25 | schema |
+| `opus` (low → high effort) | anthropic | $26 → $56 | schema |
+
+Two things degrade on open models, and the pipeline handles both rather than
+pretending otherwise. **Schema enforcement** varies — a model declared `json_object`
+gets the schema injected into its prompt instead, and output is validated identically
+either way. **Verbatim quoting** is weaker: open models paraphrase, which shows up
+directly as a lower grounding rate. That is a measurement, not a blocker — and
+measuring it is the point.
+
 ### Model choice is configuration, not code
 
 No model ID appears in any `.py` file — a test enforces this. Models are defined in
 [`config/models.yaml`](config/models.yaml) and selected by environment variable:
 
 ```bash
-VOC_ENRICHMENT_MODEL=haiku VOC_SYNTHESIS_MODEL=opus python scripts/03_run_enrichment.py
+VOC_ENRICHMENT_MODEL=qwen72b python scripts/04_run_enrichment.py --sample 100
 ```
 
 This exists so Phase 9 can run the *same* pipeline under different models and score

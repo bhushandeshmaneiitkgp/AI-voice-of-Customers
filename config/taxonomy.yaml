@@ -1,0 +1,824 @@
+# =============================================================================
+# Product taxonomy for the Quick-Commerce VoC Copilot
+#
+# Derived from the 4,620-review corpus in Phase 2, not assumed up front.
+# Full rationale and worked examples: docs/TAXONOMY.md
+#
+# STRUCTURE -- four concepts kept deliberately separate:
+#
+#   product_area   WHERE in the product/operation the feedback lands.
+#                  Polarity-neutral: an area carries both praise and complaint.
+#     issue_type     the negative manifestation, scoped to its area
+#     strength_type  the positive manifestation, scoped to its area
+#     pain_point     free text, generated per review (NOT enumerated here --
+#                    an enumerated pain point is just a narrower issue_type)
+#
+#   attributes     sentiment, severity, customer_intent, support_escalation.
+#                  These apply to the review as a whole and are NEVER folded
+#                  into the area vocabulary.
+#
+# Reviews are MULTI-LABEL. Discovery measured 1.87 areas per review on
+# average; only 29% of reviews touch exactly one area. Single-label
+# classification would be factually wrong on this corpus.
+#
+# `discovery_estimate_pct` is the share of the corpus matched by that area's
+# keyword probe. These are LOWER BOUNDS from lexical matching, not ground
+# truth -- residual analysis showed most unmatched reviews are recall misses
+# rather than genuinely uncategorised. Phase 3 LLM classification replaces
+# these numbers; they exist to size areas and to sanity-check the model.
+# =============================================================================
+
+version: "1.0.0"
+derived_from:
+  dataset: data/interim/reviews_clean.parquet
+  dataset_sha256_source: 5d3bb24ee7185612e66f57cf2e21d99e9d628a15d3d68989b8cf560996e9f138
+  n_reviews: 4620
+  method: >
+    Keyword/phrase probes, document-frequency n-grams, area co-occurrence
+    (Jaccard + conditional probability), platform discrimination spread,
+    positive:negative ratio, near-duplicate inflation check, and manual
+    reading of the unmatched residual.
+  generated_by: scripts/02_discover_taxonomy.py
+
+# -----------------------------------------------------------------------------
+# Domains: a five-way grouping for dashboard navigation only.
+# Domains are NOT a classification target -- they roll up from product_area.
+# -----------------------------------------------------------------------------
+domains:
+  fulfilment:
+    name: Fulfilment
+    description: Getting the right order to the customer, on time, at all.
+  catalogue_and_value:
+    name: Catalogue & Value
+    description: What is available to buy and what it costs.
+  money:
+    name: Money
+    description: Money moving in, out, and back. Highest trust sensitivity.
+  goods:
+    name: Goods
+    description: The physical condition of what arrived, and undoing it.
+  service_and_platform:
+    name: Service & Platform
+    description: The software, the people, and the help channel.
+
+# -----------------------------------------------------------------------------
+# Product areas (15)
+# -----------------------------------------------------------------------------
+product_areas:
+
+  # ---------------------------------------------------------------- FULFILMENT
+  - id: delivery_reliability
+    name: Delivery Reliability
+    domain: fulfilment
+    definition: >
+      Whether the order arrived, and whether it arrived when promised.
+      Concerns timing and completion of the delivery event itself.
+    inclusion:
+      - Late delivery, or delivery far slower than the promised window
+      - Order never arrived
+      - ETA shown in the app was inaccurate or kept moving
+      - Praise for speed ("delivered in 8 minutes")
+    exclusion:
+      - Wrong or missing items in an order that DID arrive -> order_fulfilment
+      - Courier behaviour or attitude -> delivery_partner_conduct
+      - Area not covered at all -> serviceability
+    discovery_estimate_pct: 22.9
+    positive_negative_ratio: 1.47
+    issue_types:
+      - id: late_delivery
+        name: Late delivery
+        evidence_phrases: ["order delayed", "still waiting", "delivery time", "took an hour"]
+      - id: never_delivered
+        name: Order never arrived
+        evidence_phrases: ["never delivered", "not delivered"]
+      - id: eta_inaccurate
+        name: ETA inaccurate or shifting
+        evidence_phrases: ["delivery times", "showing 10 minutes"]
+      - id: slot_missed
+        name: Promised slot or late-night window missed
+        evidence_phrases: ["late night", "delivered time"]
+    strength_types:
+      - id: fast_delivery
+        name: Fast delivery
+        evidence_phrases: ["fast delivery", "super fast", "quick delivery", "within minutes"]
+      - id: reliable_timing
+        name: Consistently on time
+        evidence_phrases: ["delivered time", "always on time"]
+
+  - id: order_fulfilment
+    name: Order Fulfilment Accuracy
+    domain: fulfilment
+    definition: >
+      Whether what arrived matches what was ordered. Concerns the CONTENTS of
+      a delivery that did happen.
+    inclusion:
+      - Items missing from an otherwise delivered order
+      - Wrong item or wrong variant substituted
+      - Short quantity or short weight
+      - Order marked delivered in-app but nothing received
+    exclusion:
+      - Order simply late -> delivery_reliability
+      - Item was damaged or expired but correct -> product_quality
+      - Item was never orderable because it was out of stock -> availability_and_range
+    discovery_estimate_pct: 7.4
+    positive_negative_ratio: 0.26
+    issue_types:
+      - id: missing_items
+        name: Items missing from order
+        evidence_phrases: ["missing items", "item missing", "one item less"]
+      - id: wrong_item
+        name: Wrong item delivered
+        evidence_phrases: ["wrong product", "wrong item", "delivered wrong", "received wrong"]
+      - id: short_quantity
+        name: Short quantity or weight
+        evidence_phrases: ["less quantity", "half the"]
+      - id: marked_delivered_not_received
+        name: Marked delivered but not received
+        evidence_phrases: ["without delivering", "marked as delivered", "shown delivered"]
+    strength_types:
+      - id: accurate_orders
+        name: Consistently accurate orders
+        evidence_phrases: ["always correct", "exactly what i ordered"]
+
+  - id: order_lifecycle
+    name: Order Lifecycle & Cancellation
+    domain: fulfilment
+    definition: >
+      The customer's ability to control an order after placing it, and the
+      platform cancelling orders unilaterally.
+    inclusion:
+      - Order cancelled by the platform without the customer asking
+      - No way for the customer to cancel
+      - No way to modify, add to, or edit a placed order
+      - Order stuck in a state with no progression
+    exclusion:
+      - Money owed back after a cancellation -> refunds
+      - Sending goods back after delivery -> returns_and_replacement
+    discovery_estimate_pct: 15.9
+    positive_negative_ratio: 0.09
+    issue_types:
+      - id: unwanted_cancellation
+        name: Platform cancelled the order
+        evidence_phrases: ["order cancelled", "cancelled without", "gets cancelled", "cancelled automatically"]
+      - id: cannot_cancel
+        name: No option to cancel
+        evidence_phrases: ["option to cancel", "cannot cancel", "no cancel"]
+      - id: cannot_modify
+        name: Cannot modify or add to an order
+        evidence_phrases: ["modify order", "edit order", "change the order"]
+      - id: order_stuck
+        name: Order stuck with no progress
+        evidence_phrases: ["order stuck", "still processing"]
+    strength_types:
+      - id: easy_cancellation
+        name: Easy to cancel or change
+        evidence_phrases: ["easy to cancel", "cancelled easily"]
+
+  - id: serviceability
+    name: Serviceability & Coverage
+    domain: fulfilment
+    definition: >
+      Whether the platform will serve this customer at this location at this
+      time -- a network/coverage question, upstream of any specific order.
+    inclusion:
+      - Location, address, or pincode rejected as not serviceable
+      - Valid address not accepted by the app
+      - Store shown as closed or temporarily unavailable
+    exclusion:
+      - A specific item being unavailable -> availability_and_range
+      - Delivery accepted but slow -> delivery_reliability
+    discovery_estimate_pct: 4.7
+    positive_negative_ratio: 0.45
+    issue_types:
+      - id: location_not_serviceable
+        name: Location not serviceable
+        evidence_phrases: ["location serviceable", "available pincode", "not deliver to"]
+      - id: address_not_accepted
+        name: Valid address rejected by the app
+        evidence_phrases: ["location showing", "address not", "not accepting location"]
+      - id: store_closed
+        name: Store closed or temporarily unavailable
+        evidence_phrases: ["temporarily closed", "store closed"]
+    strength_types:
+      - id: wide_coverage
+        name: Serves my area well
+        evidence_phrases: ["delivers to my area", "available everywhere"]
+
+  # ------------------------------------------------------- CATALOGUE AND VALUE
+  - id: availability_and_range
+    name: Availability & Product Range
+    domain: catalogue_and_value
+    definition: >
+      What the catalogue offers and whether it is actually in stock. Covers
+      both breadth (range) and depth (stock), which customers praise and
+      criticise in the same breath.
+    inclusion:
+      - Item out of stock or unavailable
+      - Stock status shown incorrectly (e.g. only revealed at cart)
+      - Catalogue too narrow, missing categories or brands
+      - Praise for wide selection
+    exclusion:
+      - Whole location unserved -> serviceability
+      - A phrase like 'option not available' referring to an app FEATURE rather
+        than to stock -> app_experience, or the area that feature belongs to
+        (see docs/TAXONOMY.md, Borderline case 3)
+    discovery_estimate_pct: 11.3
+    positive_negative_ratio: 1.22
+    issue_types:
+      - id: out_of_stock
+        name: Item out of stock
+        evidence_phrases: ["out of stock", "items stock", "sold out"]
+      - id: stock_status_wrong
+        name: Stock status shown incorrectly
+        evidence_phrases: ["showing unavailable", "shows unavailable", "only after adding"]
+      - id: limited_range
+        name: Catalogue too narrow
+        evidence_phrases: ["expand the product range", "not found", "limited options"]
+    strength_types:
+      - id: wide_range
+        name: Wide product range
+        evidence_phrases: ["wide range", "range of products", "more options"]
+      - id: good_availability
+        name: Things are usually in stock
+        evidence_phrases: ["always available", "products available"]
+
+  - id: pricing_and_charges
+    name: Pricing & Charges
+    domain: catalogue_and_value
+    definition: >
+      What the customer pays and how they feel about it -- item prices plus
+      every add-on fee. A value-perception area, not a transaction area.
+    inclusion:
+      - Item prices seen as too high or inflated vs MRP
+      - Delivery charge, handling fee, platform fee, surge pricing
+      - Charges perceived as hidden or added late
+      - Membership/subscription value
+      - Praise for affordability
+    exclusion:
+      - A payment that failed or double-charged -> payments
+      - A discount that did not apply -> offers_and_promotions
+    discovery_estimate_pct: 12.8
+    positive_negative_ratio: 1.59
+    issue_types:
+      - id: high_prices
+        name: Prices too high
+        evidence_phrases: ["overpriced", "expensive", "charges high", "above mrp"]
+      - id: delivery_charge
+        name: Delivery charge
+        evidence_phrases: ["delivery charges", "charge delivery", "delivery fee"]
+      - id: handling_or_platform_fee
+        name: Handling or platform fee
+        evidence_phrases: ["handling charges", "handling fee", "platform fee"]
+      - id: surge_pricing
+        name: Surge or peak pricing
+        evidence_phrases: ["surge fee", "surge charge", "rain fee"]
+      - id: hidden_charges
+        name: Charges not disclosed up front
+        evidence_phrases: ["hidden charges", "extra charges", "added at checkout"]
+      - id: membership_value
+        name: Membership not worth it
+        evidence_phrases: ["zepto pass", "membership", "subscription"]
+    strength_types:
+      - id: good_value
+        name: Good prices / good value
+        evidence_phrases: ["reasonable price", "affordable", "cheaper than"]
+
+  - id: offers_and_promotions
+    name: Offers & Promotions
+    domain: catalogue_and_value
+    definition: >
+      Advertised discounts, coupons, promised gifts, and free-delivery
+      thresholds -- and whether the platform honours them.
+    inclusion:
+      - Advertised offer not applied at checkout
+      - Coupon or promo code rejected
+      - Promised free gift or item not included
+      - Promotion seen as misleading or bait
+      - Praise for good deals
+    exclusion:
+      - Base prices being high with no offer involved -> pricing_and_charges
+      - Cashback sitting unusable in a wallet -> wallet_and_credits
+    discovery_estimate_pct: 12.6
+    positive_negative_ratio: 1.37
+    issue_types:
+      - id: offer_not_honoured
+        name: Advertised offer not applied
+        evidence_phrases: ["amount is not reduced", "offer not applied", "cheating customers"]
+      - id: coupon_failed
+        name: Coupon or promo code failed
+        evidence_phrases: ["promo code", "coupon not", "code not working"]
+      - id: promised_gift_missing
+        name: Promised gift or free item not delivered
+        evidence_phrases: ["free gift", "gift box", "gift card", "missing the gift"]
+      - id: misleading_promotion
+        name: Promotion misleading or bait-and-switch
+        evidence_phrases: ["foul play", "false advertisement", "misleading"]
+      - id: free_delivery_threshold
+        name: Free-delivery threshold confusing or changed
+        evidence_phrases: ["free delivery", "delivery above"]
+    strength_types:
+      - id: good_offers
+        name: Good offers and discounts
+        evidence_phrases: ["great discounts", "good offers", "discounted price"]
+
+  # --------------------------------------------------------------------- MONEY
+  - id: payments
+    name: Payments
+    domain: money
+    definition: >
+      Execution of the payment transaction itself -- whether money moved
+      correctly, and which methods are offered.
+    inclusion:
+      - Payment failed or gateway error
+      - Money debited without an order being placed
+      - Cash on delivery unavailable or withdrawn
+      - Too few payment methods, preferred method missing
+    exclusion:
+      - Money owed back after a failed order -> refunds
+      - Stored platform balance -> wallet_and_credits
+      - The amount being too high -> pricing_and_charges
+    discovery_estimate_pct: 11.3
+    positive_negative_ratio: 0.44
+    issue_types:
+      - id: payment_failed
+        name: Payment failed
+        evidence_phrases: ["payment failed", "transaction failed", "gateway"]
+      - id: money_deducted_no_order
+        name: Money deducted but no order placed
+        evidence_phrases: ["money deducted", "amount deducted", "money debited"]
+      - id: cod_unavailable
+        name: Cash on delivery not offered
+        evidence_phrases: ["cash on delivery", "cod option", "cash delivery"]
+      - id: limited_payment_options
+        name: Too few payment methods
+        evidence_phrases: ["payment option", "payment method", "payment options"]
+    strength_types:
+      - id: smooth_payment
+        name: Payment works smoothly
+        evidence_phrases: ["payment was smooth", "easy payment"]
+
+  - id: refunds
+    name: Refunds
+    domain: money
+    definition: >
+      Money the platform owes back to the customer, and whether it arrives.
+      A trust-critical area: discovery found essentially no praise here.
+    inclusion:
+      - Refund not received at all
+      - Refund taking too long or repeatedly "initiated"
+      - Partial refund where a full one was expected
+      - Refund policy unclear or refused
+    exclusion:
+      - Sending physical goods back -> returns_and_replacement
+      - Refund credited to a wallet the customer cannot spend -> wallet_and_credits
+      - The cancellation that caused it -> order_lifecycle
+    discovery_estimate_pct: 16.5
+    positive_negative_ratio: 0.16
+    issue_types:
+      - id: refund_not_received
+        name: Refund never arrived
+        evidence_phrases: ["money back", "not received refund", "still refund"]
+      - id: refund_delayed
+        name: Refund delayed
+        evidence_phrases: ["refund initiated", "refund pending", "days for refund"]
+      - id: partial_refund
+        name: Only partially refunded
+        evidence_phrases: ["partial refund", "less amount"]
+      - id: refund_refused
+        name: Refund refused or policy unclear
+        evidence_phrases: ["refund policy", "refused to refund"]
+    strength_types:
+      - id: quick_refund
+        name: Refund handled quickly
+        evidence_phrases: ["refunded immediately", "instant refund"]
+
+  - id: wallet_and_credits
+    name: Wallet & Stored Credits
+    domain: money
+    definition: >
+      Platform-held balance -- wallet money, branded cash (e.g. Zepto Cash),
+      cashback, and credits. Money the customer already owns but cannot
+      necessarily use.
+    inclusion:
+      - Wallet balance disappeared or changed without explanation
+      - Balance visible but not spendable at checkout
+      - Cashback or credit never applied
+      - Refund forced into wallet instead of the original payment method
+    exclusion:
+      - Money never left the customer's bank -> payments
+      - Refund to the original payment method -> refunds
+    discovery_estimate_pct: 11.8
+    positive_negative_ratio: 0.26
+    platform_note: >
+      Strongest platform discriminator in the corpus: 27.9% of Zepto reviews
+      vs 1.2% Blinkit and 2.9% JioMart -- a 22.7x spread.
+    issue_types:
+      - id: balance_unusable
+        name: Balance visible but cannot be spent
+        evidence_phrases: ["wallet wanted", "option not available", "cannot use wallet"]
+      - id: balance_disappeared
+        name: Balance vanished or reduced unexplained
+        evidence_phrases: ["wallet balance", "money in wallet", "wallet amount", "disappeared"]
+      - id: credit_not_applied
+        name: Credit or cashback not applied
+        evidence_phrases: ["cashback not", "credit not applied"]
+      - id: refund_locked_in_wallet
+        name: Refund forced into wallet, not bank
+        evidence_phrases: ["refunded to wallet", "only wallet"]
+    strength_types:
+      - id: wallet_convenient
+        name: Wallet and cashback are useful
+        evidence_phrases: ["cashback rewards", "wallet is convenient"]
+
+  # --------------------------------------------------------------------- GOODS
+  - id: product_quality
+    name: Product Quality & Condition
+    domain: goods
+    definition: >
+      The physical state and authenticity of what arrived, including the
+      packaging that protects it.
+    inclusion:
+      - Expired or near-expiry items
+      - Stale, rotten, or spoiled fresh produce
+      - Damaged, leaking, or broken items
+      - Counterfeit, fake, or used goods
+      - Packaging failure causing spillage or damage
+      - Praise for freshness and quality
+    exclusion:
+      - Correct condition but wrong product -> order_fulfilment
+      - Wanting to send it back -> returns_and_replacement
+    discovery_estimate_pct: 18.9
+    positive_negative_ratio: 1.42
+    issue_types:
+      - id: expired_product
+        name: Expired or near-expiry
+        evidence_phrases: ["expiry date", "expired product", "expired products"]
+      - id: stale_or_rotten
+        name: Stale, rotten, or spoiled
+        evidence_phrases: ["rotten", "stale", "fungus", "spoiled"]
+      - id: damaged_product
+        name: Damaged or broken on arrival
+        evidence_phrases: ["damaged product", "received damaged", "broken", "leaking"]
+      - id: counterfeit_or_used
+        name: Fake, duplicate, or previously used
+        evidence_phrases: ["fake product", "duplicate", "used item"]
+      - id: poor_quality_general
+        name: Poor quality, unspecified
+        evidence_phrases: ["poor quality", "bad quality", "low quality"]
+      - id: packaging_failure
+        name: Packaging inadequate
+        evidence_phrases: ["packaging", "packing", "not sealed", "spilled"]
+    strength_types:
+      - id: fresh_and_good_quality
+        name: Fresh, good-quality products
+        evidence_phrases: ["good quality", "quality products", "fresh products", "all fresh"]
+
+  - id: returns_and_replacement
+    name: Returns & Replacement
+    domain: goods
+    definition: >
+      The process of sending goods back or getting them swapped. Distinct
+      from refunds: this is about GOODS movement, refunds is about MONEY.
+      A single review often needs both labels.
+    inclusion:
+      - No return option available in the app
+      - Return or replacement request rejected
+      - Replacement promised but never arrived
+      - Return window or policy unclear
+    exclusion:
+      - Only money is being asked for, no goods movement -> refunds
+      - The reason the item is being returned -> product_quality
+    discovery_estimate_pct: 12.8
+    positive_negative_ratio: 0.30
+    issue_types:
+      - id: no_return_option
+        name: No way to return
+        evidence_phrases: ["option to return", "no way to return", "no return"]
+      - id: return_request_rejected
+        name: Return or replacement refused
+        evidence_phrases: ["return request", "refused to return", "no exchange policy"]
+      - id: replacement_not_delivered
+        name: Replacement promised but not delivered
+        evidence_phrases: ["replacement refund", "replacement not"]
+      - id: return_policy_unclear
+        name: Return policy unclear
+        evidence_phrases: ["return policy", "return exchange"]
+    strength_types:
+      - id: easy_returns
+        name: Returns handled easily
+        evidence_phrases: ["easy return", "instant returns", "replaced quickly"]
+
+  # ------------------------------------------------------- SERVICE AND PLATFORM
+  - id: customer_support
+    name: Customer Support
+    domain: service_and_platform
+    definition: >
+      The help channel itself -- reachability, responsiveness, and competence.
+      Use this area when SUPPORT IS THE PROBLEM, not merely mentioned.
+      When support is mentioned while failing at another problem, label the
+      underlying area and set the `support_escalation` attribute instead.
+    inclusion:
+      - No response to emails, chats, or calls
+      - No reachable contact channel or phone number
+      - Agent unhelpful, dismissive, or scripted
+      - Chatbot loop with no path to a human
+      - Issue category simply not listed in the help flow
+    exclusion:
+      - Support mentioned only as context for another failure - label the
+        underlying area instead and set support_escalation = true
+      - Delivery partner rudeness -> delivery_partner_conduct
+    discovery_estimate_pct: 29.1
+    positive_negative_ratio: 0.25
+    downstream_note: >
+      Support co-occurs far above base rate with operational failures
+      (P(support | order_fulfilment) = 45% vs 28.6% base, lift 1.57) and far
+      below it for pricing (18.2%) and serviceability (15.4%). Support is a
+      failure amplifier, not an independent driver -- which is exactly why
+      support_escalation exists as a separate attribute.
+    issue_types:
+      - id: no_response
+        name: No response from support
+        evidence_phrases: ["not respond", "no response", "never replied"]
+      - id: no_contact_channel
+        name: No way to reach a human
+        evidence_phrases: ["no contact number", "no phone number", "no call centre"]
+      - id: unhelpful_agent
+        name: Agent unhelpful or dismissive
+        evidence_phrases: ["poor customer", "pathetic customer", "not supportive"]
+      - id: chatbot_loop
+        name: Stuck in a chatbot with no escape
+        evidence_phrases: ["chatbot", "chat bot", "automated reply"]
+      - id: issue_not_listed
+        name: My issue is not an option in the help flow
+        evidence_phrases: ["issue is not listed", "no further option", "not listed there"]
+      - id: unresolved_escalation
+        name: Escalated but never resolved
+        evidence_phrases: ["still not resolved", "escalated", "no resolution"]
+    strength_types:
+      - id: helpful_support
+        name: Support was responsive and helpful
+        evidence_phrases: ["support was helpful", "resolved quickly", "good customer service"]
+
+  - id: delivery_partner_conduct
+    name: Delivery Partner Conduct
+    domain: service_and_platform
+    definition: >
+      The behaviour of the human delivering the order, as distinct from the
+      logistics of the delivery.
+    inclusion:
+      - Rude, aggressive, or abusive behaviour
+      - Refused to deliver to the door or correct floor
+      - Pressured the customer for a tip
+      - Cash collection dispute or overcharging at the door
+      - Marked an order delivered without handing it over
+      - Praise for courteous partners
+    exclusion:
+      - Delivery merely late -> delivery_reliability
+      - Items wrong or missing -> order_fulfilment
+    discovery_estimate_pct: 12.7
+    positive_negative_ratio: 0.80
+    issue_types:
+      - id: rude_behaviour
+        name: Rude or abusive behaviour
+        evidence_phrases: ["rude", "misbehaved", "abusive", "arguing"]
+      - id: did_not_deliver_to_door
+        name: Would not deliver to the door
+        evidence_phrases: ["2nd floor", "not come up", "left at gate"]
+      - id: tip_pressure
+        name: Pressured for a tip
+        evidence_phrases: ["asking for tip", "demanded tip"]
+      - id: cash_collection_dispute
+        name: Cash collection or overcharge at the door
+        evidence_phrases: ["took extra", "collected more", "overcharged"]
+      - id: false_delivery_marking
+        name: Marked delivered without handing over
+        evidence_phrases: ["marked delivered", "without delivering"]
+    strength_types:
+      - id: courteous_partner
+        name: Courteous, professional delivery partner
+        evidence_phrases: ["polite", "courteous", "very professional"]
+
+  - id: app_experience
+    name: App Experience
+    domain: service_and_platform
+    definition: >
+      The software: stability, speed, navigation, account access, and gaps in
+      functionality. Covers login/OTP, which discovery showed is too small
+      (2.1%) to justify a separate area.
+    inclusion:
+      - Crashes, freezes, hangs
+      - App slow or laggy
+      - Cart or checkout bugs
+      - Login, OTP, password, or account access failures
+      - Confusing navigation or interface
+      - Requests for features that do not exist
+      - Praise for ease of use
+    exclusion:
+      - The delivery itself being slow -> delivery_reliability
+      - An offer failing to apply -> offers_and_promotions
+    discovery_estimate_pct: 17.8
+    positive_negative_ratio: 0.98
+    issue_types:
+      - id: crash_or_freeze
+        name: Crashes or freezes
+        evidence_phrases: ["crash", "hangs", "freezes"]
+      - id: slow_performance
+        name: App slow or laggy
+        evidence_phrases: ["app is slow", "very slow", "takes much more time"]
+      - id: cart_or_checkout_bug
+        name: Cart or checkout malfunction
+        evidence_phrases: ["items cart", "add cart", "remove from cart", "cart value"]
+      - id: login_or_otp_failure
+        name: Login, OTP, or account access failure
+        evidence_phrases: ["otp", "login", "sign in", "password"]
+      - id: navigation_confusing
+        name: Confusing navigation or interface
+        evidence_phrases: ["hard to find", "confusing", "interface"]
+      - id: missing_feature
+        name: Requested feature does not exist
+        evidence_phrases: ["app should include", "please add", "there is no option"]
+    strength_types:
+      - id: easy_to_use
+        name: Easy to use, well designed
+        evidence_phrases: ["user friendly", "easy to navigate", "user interface", "friendly interface"]
+
+# -----------------------------------------------------------------------------
+# Attributes -- reviewed-level, NEVER folded into the area vocabulary.
+# This separation is the point of requirement 5: an area says WHERE, an
+# attribute says HOW BAD / HOW THEY FEEL / WHAT THEY WANT.
+# -----------------------------------------------------------------------------
+attributes:
+
+  sentiment:
+    description: Overall polarity of the review toward the platform.
+    type: single_select
+    values:
+      - id: positive
+        definition: Predominantly favourable.
+      - id: negative
+        definition: Predominantly unfavourable.
+      - id: mixed
+        definition: >
+          Substantive praise AND substantive criticism. Common in this corpus
+          ("great app but delivery charges are unfair") and must not be
+          collapsed into neutral -- a mixed review names a working product
+          with one broken surface, which is a different PM signal.
+      - id: neutral
+        definition: Descriptive or factual with no clear polarity.
+
+  severity:
+    description: >
+      How much harm the reported problem caused. Independent of sentiment --
+      a calm review can describe a critical problem. Only meaningful when
+      sentiment is negative or mixed.
+    type: single_select
+    values:
+      - id: critical
+        definition: >
+          Money lost with no resolution path, health/safety risk (consumed
+          spoiled food), account locked, or an explicit statement of leaving
+          the platform for good.
+      - id: high
+        definition: >
+          Order failed and remains unresolved, or the same failure has
+          happened repeatedly.
+      - id: medium
+        definition: Single failure, resolved or clearly resolvable. Real friction.
+      - id: low
+        definition: Minor annoyance, preference, or cosmetic complaint.
+
+  customer_intent:
+    description: What the customer is trying to achieve by writing the review.
+    type: single_select
+    values:
+      - id: complaint
+        definition: Reporting a problem.
+      - id: praise
+        definition: Expressing satisfaction.
+      - id: feature_request
+        definition: >
+          Asking for functionality that does not exist. Found in the residual
+          analysis (e.g. a request for an order-history statement view) and
+          easily mislabelled as a complaint.
+      - id: churn_warning
+        definition: >
+          Stating they have stopped or will stop using the platform. High
+          business value; must be separable from ordinary complaints.
+      - id: comparison
+        definition: >
+          Comparing against a competitor (Instamart, BigBasket, Amazon,
+          Flipkart, Zomato appear in the corpus).
+      - id: question
+        definition: Asking something rather than reporting.
+
+  support_escalation:
+    description: >
+      True when the customer contacted or tried to contact support about the
+      issue, regardless of which area the issue belongs to. Exists because
+      support is a downstream amplifier: labelling it only as an area would
+      either double-count it or hide which upstream failures generate contact.
+      This attribute is what makes "contact deflection" analysis possible.
+    type: boolean
+
+  evidence_span:
+    description: >
+      Verbatim substring of the review that justifies each assigned area and
+      issue_type. Required so Phase 9 can measure grounding and so the UI can
+      show a PM exactly which words drove a label.
+    type: text
+
+  confidence:
+    description: Model's confidence in the assignment, 0.0-1.0.
+    type: float
+
+# -----------------------------------------------------------------------------
+# Special areas
+#
+# Some analyses need to refer to one specific area by name (the support-lift
+# baseline needs to know which area represents support). Naming it here rather
+# than in Python keeps the "no taxonomy terms in code" rule absolute -- rename
+# the area and every analysis follows automatically.
+# -----------------------------------------------------------------------------
+special_areas:
+  support_area: customer_support
+
+# -----------------------------------------------------------------------------
+# Fallback for reviews with no assignable area.
+# -----------------------------------------------------------------------------
+fallback_area:
+  id: general_no_specific_area
+  name: General / No Specific Area
+  definition: >
+    Generic praise or criticism with no identifiable product surface
+    ("worst app ever", "very good service"). Discovery residual analysis
+    found the unmatched 8.9% is dominated by these plus lexical recall
+    misses, NOT by a missing category.
+  monitoring_rule: >
+    If LLM classification assigns this to more than 10% of reviews, the
+    taxonomy has a real gap and must be revisited before the results are
+    trusted.
+
+# -----------------------------------------------------------------------------
+# Dataset caveats the enrichment prompt and the UI must both respect.
+# -----------------------------------------------------------------------------
+dataset_caveats:
+  rating_imbalance: >
+    77.5% of reviews are negative. Area frequencies describe a complaint
+    sample, not a customer base. Never state an area's share as "% of
+    customers affected".
+  temporal_concentration: >
+    87% of reviews fall in Oct-Dec 2024; Blinkit has 12 reviews before
+    October and Zepto has 1. Area trends are only comparable across
+    platforms within that three-month window.
+  truncation_bias: >
+    370 reviews (8.0%) hit a 500-character scraper cap. Truncated reviews
+    average 1.36 stars vs 1.83 overall and are 90.8% negative vs 77.6% --
+    they are cut before any resolution is described. Severity and
+    support_escalation must be treated as lower-confidence on these.
+  near_duplicate_templates: >
+    18 near-duplicate groups covering 49 reviews. Inflation of area shares
+    is under 0.4 percentage points, so the taxonomy is not built on
+    templated noise -- but pain-point counts should still be reported both
+    raw and representative-only.
+  non_representative_sample: >
+    App-store reviews are self-selected. Cross-platform differences in area
+    share are differences within this dataset, never statements about which
+    platform's customers are better served.
+  discovery_estimates_are_lower_bounds: >
+    All discovery_estimate_pct values come from keyword probes. Manual
+    reading of unmatched reviews showed most are recall misses (e.g.
+    "received one item less" is order_fulfilment but matches no probe).
+    Treat these as floors and expect LLM classification to assign more.
+
+# -----------------------------------------------------------------------------
+# Discovery probes
+#
+# The exact regexes used to produce every `discovery_estimate_pct` above.
+# They live here rather than in Python so the numbers are reproducible and so
+# no taxonomy knowledge is hardcoded in a module (a test enforces this).
+#
+# These are a DISCOVERY instrument, not the classifier. They have high
+# precision and mediocre recall by design -- readable patterns that let a
+# human audit why an area was sized the way it was. Phase 3 replaces them.
+# Matching is case-insensitive against `review_text`.
+# -----------------------------------------------------------------------------
+discovery_probes:
+  delivery_reliability: "(?:late|delay|slow deliver|took an hour|not deliver|never deliver|on time|delivery time|eta|still waiting|fast deliver|quick deliver|within minutes|super fast|delivery speed)"
+  order_fulfilment: "(?:missing item|items missing|item missing|wrong item|wrong product|incomplete|didn't receive|not received|marked as deliver|shown deliver|without deliver|half the|quantity)"
+  order_lifecycle: "(?:cancel|modify order|edit order|order stuck|change the order)"
+  serviceability: "(?:location|pincode|pin code|address not|area not|not serviceable|don't deliver to|no service in)"
+  availability_and_range: "(?:out of stock|not available|unavailable|sold out|no items|variety|wide range|range of product|selection|assortment)"
+  # NOTE: probes containing \b MUST use single quotes. In a YAML double-quoted
+  # scalar, \b is the backspace escape, which silently turns a word-boundary
+  # anchor into a control character that matches nothing. The loader rejects
+  # control characters in probes so this cannot regress unnoticed.
+  pricing_and_charges: '(?:price|pricing|expensive|costly|overcharg|charges|charged|handling fee|platform fee|surge|\bmrp\b|membership|subscription|hidden fee|hidden charge)'
+  offers_and_promotions: "(?:offer|coupon|discount|promo|voucher|free delivery|free gift|gift)"
+  payments: '(?:payment|upi|paytm|transaction|debited|deducted|cash on delivery|\bcod\b|gateway|card declin)'
+  refunds: "(?:refund|money back|amount not credit|reversal|money not return)"
+  wallet_and_credits: "(?:wallet|zepto cash|supercash|super cash|credits|cashback|balance)"
+  product_quality: "(?:expired|expiry|rotten|stale|spoil|damag|leak|fresh|quality|fake|duplicate|smell|used item|broken|packag|packing|seal)"
+  returns_and_replacement: "(?:return|replace|exchange)"
+  customer_support: '(?:customer care|customer support|customer service|support team|helpline|chatbot|chat bot|\bagent\b|no response|not respond|no contact number|no phone number|escalat)'
+  delivery_partner_conduct: '(?:delivery boy|delivery partner|delivery person|delivery guy|delivery agent|delivery executive|rider|rude|behaviour|behavior|misbehav|\btip\b|abusi)'
+  app_experience: '(?:crash|hang|lag|freez|\bbug\b|glitch|app is slow|slow app|not working|error|interface|navigat|user friendly|\bui\b|cart|login|log in|sign in|\botp\b|password)'

@@ -194,6 +194,29 @@ def test_support_escalation_is_a_boolean_attribute(taxonomy: Taxonomy) -> None:
     assert taxonomy.special_area("support_area") in taxonomy.area_ids
 
 
+def test_borderline_rules_are_declared(taxonomy: Taxonomy) -> None:
+    """The hard distinctions are taxonomy data, feeding both docs and the prompt."""
+    assert len(taxonomy.borderline_rules) >= 5
+    for rule in taxonomy.borderline_rules:
+        assert len(rule.strip()) > 40
+
+
+def test_borderline_rules_reference_real_areas(taxonomy: Taxonomy) -> None:
+    """A rule naming a renamed area would silently teach the model a dead label."""
+    known = set(taxonomy.area_ids) | {taxonomy.fallback_area.id}
+    joined = " ".join(taxonomy.borderline_rules)
+    referenced = {
+        token for token in re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", joined)
+        if token.endswith(tuple(area.split("_")[-1] for area in known))
+    }
+    unknown = {
+        token for token in referenced
+        if token not in known
+        and token not in {"support_escalation", "missing_feature", "return_or_refund"}
+    }
+    assert not unknown, f"borderline rules reference unknown identifiers: {sorted(unknown)}"
+
+
 def test_special_areas_resolve_to_real_areas(taxonomy: Taxonomy) -> None:
     for role, target in taxonomy.special_areas.items():
         assert target in taxonomy.area_ids, f"special_areas.{role} -> unknown area {target!r}"

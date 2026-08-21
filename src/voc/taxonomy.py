@@ -125,6 +125,7 @@ class Taxonomy(BaseModel):
     domains: list[Domain]
     product_areas: list[ProductArea]
     attributes: list[Attribute]
+    borderline_rules: list[str]
     special_areas: dict[str, str]
     fallback_area: FallbackArea
     dataset_caveats: dict[str, str]

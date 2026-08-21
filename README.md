@@ -4,10 +4,10 @@ Turns 4,620 unstructured customer reviews from **Blinkit**, **Zepto**, and **Jio
 into evidence-backed product insights: recurring pain points, supporting evidence,
 product opportunities, RICE prioritisation, and experiment plans.
 
-> **Status: Phases 1–2 of 10 complete.** Data foundation (ingestion, cleaning,
-> profiling), the corpus-derived product taxonomy, and full exploratory analysis
-> are built and verified, with **173 passing tests**. AI enrichment, RAG, LangGraph
-> orchestration, and the Streamlit UI are scheduled — see [Roadmap](#roadmap).
+> **Status: Phases 1–3 of 10 complete.** Data foundation, the corpus-derived
+> product taxonomy, full exploratory analysis, and the AI enrichment pipeline are
+> built and verified, with **226 passing tests**. RAG, LangGraph orchestration, and
+> the Streamlit UI are scheduled — see [Roadmap](#roadmap).
 >
 > Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
 > summary) · [`docs/TAXONOMY.md`](docs/TAXONOMY.md) · [`reports/EDA_REPORT.md`](reports/EDA_REPORT.md)
@@ -84,7 +84,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 3 | Profiling / EDA | `src/voc/profiling.py` | ✅ Phase 1 |
 | 3b | Taxonomy discovery | `src/voc/taxonomy.py`, `discovery.py` | ✅ Phase 2 |
 | 3c | EDA + figures | `src/voc/eda.py`, `plots.py` | ✅ Phase 2 |
-| 4 | AI enrichment | `src/voc/enrich.py` | Phase 3 |
+| 4 | AI enrichment | `src/voc/enrich.py`, `llm.py`, `prompts.py` | ✅ Phase 3 |
 | 5 | Pain-point discovery | `src/voc/painpoints.py` | Phase 4 |
 | 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | Phase 4 |
 | 7 | Trend analysis | `src/voc/trends.py` | Phase 5 |
@@ -149,6 +149,12 @@ python scripts/02_discover_taxonomy.py
 
 ```bash
 python scripts/03_run_eda.py
+```
+
+Phase 3 needs an API key. Smoke-test on 20 reviews first:
+
+```bash
+python scripts/04_run_enrichment.py --sample 20
 ```
 
 Run the tests:
@@ -243,6 +249,27 @@ else broke. That is why `support_escalation` is a review-level attribute *as wel
 `customer_support` being an area — which is what makes contact-deflection analysis
 possible later.
 
+### Enrichment trusts nothing the model returns
+
+A structured response is not a correct one. Three independent checks sit between
+the model and the dataset:
+
+1. **Schema** — Pydantic plus a strict JSON schema whose enums are injected from the
+   taxonomy at runtime, so the contract cannot drift from `taxonomy.yaml`.
+2. **Taxonomy validation** — every label must exist, and every issue type must belong
+   to the area it was filed under. Models invent plausible categories; a real issue
+   type under the wrong parent is the subtler failure, and both are caught.
+3. **Grounding verification** — every `evidence_span` must appear **verbatim** in the
+   review that produced it. This is the project's primary hallucination metric:
+   deterministic, needs no judge model, and directly answers "is this insight actually
+   supported by the review it cites".
+
+Reviews are sent in groups of five to amortise the ~4,400-token taxonomy prompt, but
+every returned `review_id` is reconciled against what was requested in **both**
+directions. A skipped review is retried individually; an id that was never requested
+is discarded. Without that check, one omission would silently shift every label in the
+group onto the wrong rows.
+
 ### Model choice is configuration, not code
 
 No model ID appears in any `.py` file — a test enforces this. Models are defined in
@@ -318,7 +345,7 @@ quickcommerce-voc-copilot/
 |---|---|
 | ✅ 1 | Scaffold, ingestion, cleaning, profiling, tests |
 | ✅ 2 | Taxonomy discovery + full EDA, figures, and product intelligence summary |
-| 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
+| ✅ 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
 | 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | 5 | Trend analysis + competitive metrics |
 | 6 | RAG evidence retrieval + LangGraph orchestration |

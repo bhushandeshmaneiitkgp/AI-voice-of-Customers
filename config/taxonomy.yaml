@@ -732,6 +732,53 @@ attributes:
     type: float
 
 # -----------------------------------------------------------------------------
+# Borderline rules
+#
+# The distinctions that are actually hard, each one an observed confusion from
+# reading the corpus in Phase 2 (full evidence: docs/TAXONOMY.md section 6).
+#
+# These live here rather than in the prompt module for the same reason every
+# other definition does: they name product areas, so keeping them in Python
+# would let them drift from the taxonomy silently. They are injected verbatim
+# into the Phase 3 classification prompt and each becomes a gold-set case in
+# Phase 9.
+# -----------------------------------------------------------------------------
+borderline_rules:
+  - >
+    REFUND vs RETURN: refund = money moving back; return = goods moving back.
+    A review saying "return or refund" legitimately gets BOTH labels.
+  - >
+    REFUND vs WALLET: money returned to the original payment method is refunds.
+    Money returned as platform wallet credit the customer cannot spend is
+    wallet_and_credits - it came back in name only.
+  - >
+    'OPTION NOT AVAILABLE': about an ITEM means availability_and_range. About an
+    APP FEATURE (most often 'no option to use my wallet balance') means the area
+    that feature belongs to, usually wallet_and_credits or app_experience.
+  - >
+    DELIVERY LATE vs PARTNER: the delivery being slow is delivery_reliability.
+    The person being rude, refusing stairs, or demanding a tip is
+    delivery_partner_conduct. 'The delivery partner was 40 minutes late' is
+    reliability - the partner is incidental.
+  - >
+    OUT OF STOCK vs NOT SERVICEABLE: an item being unavailable is
+    availability_and_range. The whole location being unserved is serviceability.
+  - >
+    SUPPORT MENTIONED vs SUPPORT AT FAULT: if support is named only as context
+    for another failure, label the UNDERLYING area and set
+    support_escalation=true. Only use customer_support as an area when the
+    support interaction is itself the complaint (no reply, no contact channel,
+    chatbot loop, issue not listed).
+  - >
+    SARCASM: star ratings can contradict the text. Derive sentiment from the
+    TEXT only. A 5-star review reading 'Wow, hats off for redefining customer
+    experience - a cancellation email with no explanation' is NEGATIVE sentiment.
+  - >
+    FEATURE REQUESTS are not complaints. 'The app should include an order
+    history statement' is app_experience / missing_feature with
+    intent=feature_request.
+
+# -----------------------------------------------------------------------------
 # Special areas
 #
 # Some analyses need to refer to one specific area by name (the support-lift

@@ -62,6 +62,8 @@ class Paths:
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"
+    figures_dir = PROJECT_ROOT / "reports" / "figures"
+    eda_report = PROJECT_ROOT / "reports" / "EDA_REPORT.md"
     taxonomy_discovery_report = PROJECT_ROOT / "reports" / "taxonomy_discovery.md"
     taxonomy_discovery_areas = PROJECT_ROOT / "data" / "processed" / "taxonomy_discovery_areas.csv"
     taxonomy_discovery_matrix = PROJECT_ROOT / "data" / "processed" / "taxonomy_discovery_cooccurrence.csv"
@@ -75,6 +77,7 @@ class Paths:
             cls.eval_dir,
             cls.artifacts_dir,
             cls.reports_dir,
+            cls.figures_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

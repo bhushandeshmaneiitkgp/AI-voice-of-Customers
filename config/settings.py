@@ -57,7 +57,15 @@ class Paths:
     clean_reviews = PROJECT_ROOT / "data" / "interim" / "reviews_clean.parquet"
     clean_report = PROJECT_ROOT / "data" / "interim" / "cleaning_report.json"
     processed_dir = PROJECT_ROOT / "data" / "processed"
+    enriched_reviews = PROJECT_ROOT / "data" / "processed" / "reviews_enriched.parquet"
+    enriched_labels = PROJECT_ROOT / "data" / "processed" / "review_labels.parquet"
+    enrichment_report = PROJECT_ROOT / "data" / "processed" / "enrichment_report.json"
     eval_dir = PROJECT_ROOT / "data" / "eval"
+
+    @classmethod
+    def enrichment_cache(cls, model_key: str) -> Path:
+        """Per-model response cache, so a model benchmark cannot cross-contaminate."""
+        return cls.artifacts_dir / f"enrichment_cache_{model_key}.json"
 
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
@@ -175,6 +183,12 @@ class Settings(BaseSettings):
     enrichment_model: str = "opus"
     synthesis_model: str = "opus"
     use_batch_api: bool = True
+
+    # Overrides the model's default effort for the enrichment pass only.
+    # Classification is a narrow task, so lower effort is often the right
+    # trade: thinking tokens are billed as output and dominate the bill at
+    # high effort. Ignored by models that do not support effort.
+    enrichment_effort: str | None = None
 
     # --- Cleaning parameters ----------------------------------------------
     # Justification for 500: the raw file shows a hard pile-up at exactly

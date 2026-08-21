@@ -1,0 +1,247 @@
+"""
+Run AI enrichment over the cleaned corpus.
+
+Requires ANTHROPIC_API_KEY (see .env.example). The model is chosen by
+environment variable, never hardcoded:
+
+    # smoke test — 20 reviews, immediate, costs cents
+    python scripts/04_run_enrichment.py --sample 20
+
+    # full corpus via the Batch API (50% cheaper)
+    python scripts/04_run_enrichment.py --all --batch
+
+    # benchmark a different model against the same reviews
+    VOC_ENRICHMENT_MODEL=haiku python scripts/04_run_enrichment.py --sample 100
+
+Reads  : data/interim/reviews_clean.parquet   (read-only)
+         config/taxonomy.yaml
+Writes : data/processed/reviews_enriched.parquet
+         data/processed/review_labels.parquet
+         data/processed/enrichment_report.json
+         artifacts/enrichment_cache_<model>.json
+
+Every run prints a cost estimate first and asks before spending money.
+"""
+
+from __future__ import annotations
+
+import _bootstrap  # noqa: F401  -- must precede project imports
+import argparse
+import json
+import logging
+import sys
+
+import pandas as pd
+
+from config.settings import Paths, get_settings, load_model_registry
+from voc.enrich import (
+    EnrichmentCache,
+    build_run_report,
+    collect_batch_results,
+    enrich_sync,
+    poll_batch,
+    submit_batch,
+    to_dataframes,
+)
+from voc.llm import (
+    DEFAULT_REVIEWS_PER_REQUEST,
+    create_client,
+    estimate_cost,
+    resolve_effort,
+)
+from voc.prompts import build_system_prompt
+from voc.taxonomy import get_taxonomy
+
+
+def main() -> int:
+    settings = get_settings()
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--sample", type=int, metavar="N", help="Enrich a stratified sample of N reviews.")
+    selection.add_argument("--all", action="store_true", help="Enrich the full corpus.")
+    parser.add_argument("--batch", action="store_true", help="Use the Batch API (50%% cheaper, async).")
+    parser.add_argument(
+        "--reviews-per-request", type=int, default=DEFAULT_REVIEWS_PER_REQUEST,
+        help="Reviews per API call. Higher amortises the prompt; missing ones are retried.",
+    )
+    parser.add_argument(
+        "--effort", default=settings.enrichment_effort,
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="Override the model's default effort. Lower is cheaper; thinking tokens bill as output.",
+    )
+    parser.add_argument("--yes", action="store_true", help="Skip the cost confirmation prompt.")
+    parser.add_argument("--dry-run", action="store_true", help="Estimate cost and exit without calling the API.")
+    parser.add_argument("--seed", type=int, default=42, help="Sampling seed.")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=settings.log_level, format="%(levelname)-8s %(name)s | %(message)s")
+    log = logging.getLogger("enrich")
+    Paths.ensure_output_dirs()
+
+    if not Paths.clean_reviews.exists():
+        log.error("Cleaned dataset not found. Run: python scripts/01_build_clean.py")
+        return 1
+
+    taxonomy = get_taxonomy()
+    profile = settings.enrichment_profile
+    frame = pd.read_parquet(Paths.clean_reviews)
+    frame["platform"] = frame["platform"].astype(str)
+    frame["rating_bucket"] = frame["rating_bucket"].astype(str)
+
+    if args.sample:
+        # Stratify by platform and rating bucket so a small sample still
+        # contains positives and every platform -- a uniform sample of a 77.6%
+        # negative corpus would barely exercise the strength vocabulary.
+        n = min(args.sample, len(frame))
+        frame = (
+            frame.groupby(["platform", "rating_bucket"], observed=True, group_keys=False)
+            .apply(lambda g: g.sample(max(1, round(n * len(g) / len(frame))), random_state=args.seed))
+            .head(n)
+            .reset_index(drop=True)
+        )
+        log.info("Stratified sample: %d reviews", len(frame))
+
+    system_prompt = build_system_prompt(taxonomy)
+    effort = resolve_effort(profile, args.effort)
+    estimate = estimate_cost(
+        profile, len(frame), system_prompt, args.reviews_per_request, effort=effort
+    )
+
+    print()
+    print("=" * 78)
+    print("  AI ENRICHMENT")
+    print("=" * 78)
+    print(f"  Model            : {profile.display_name}  ({profile.model_id})")
+    print(f"  Selected via     : VOC_ENRICHMENT_MODEL={profile.key}")
+    print(f"  Thinking         : {profile.thinking_style}"
+          + (f", effort={effort}" if effort else " (effort unsupported by this model)"))
+    print(f"  Reviews          : {len(frame):,}")
+    print(f"  Prompt           : ~{len(system_prompt) // 4:,} tokens (cached across requests)")
+    print(f"  Transport        : {'Batch API' if args.batch else 'synchronous'}")
+    print("-" * 78)
+    print(f"  ESTIMATE         : {estimate.summary(args.batch)}")
+    print(f"  (standard ${estimate.usd_standard:,.2f} / batch ${estimate.usd_batch:,.2f}. "
+          "Includes estimated thinking tokens; excludes prompt-cache savings.)")
+
+    if args.dry_run:
+        print("-" * 78)
+        print("  OPTIONS for this workload (Batch API pricing):")
+        print(f"  {'model':<10}{'effort':<9}{'est. $':>10}   notes")
+        registry = load_model_registry()
+        for key in ("opus", "sonnet", "haiku"):
+            candidate = registry[key]
+            for level in ("low", "medium", "high"):
+                candidate_effort = resolve_effort(candidate, level)
+                option = estimate_cost(
+                    candidate, len(frame), system_prompt,
+                    args.reviews_per_request, effort=candidate_effort,
+                )
+                note = "" if candidate.supports_effort else "effort unsupported; runs without thinking"
+                shown = candidate_effort or "n/a"
+                print(f"  {key:<10}{shown:<9}{option.usd_batch:>10,.2f}   {note}")
+                if not candidate.supports_effort:
+                    break
+        print()
+        print("  Benchmark before committing: run --sample 100 on two models, compare")
+        print("  grounding rate and validation issues, then choose. That comparison is")
+        print("  itself a Phase 9 deliverable.")
+    print("=" * 78)
+    print()
+
+    if args.dry_run:
+        log.info("Dry run - no API calls made.")
+        return 0
+
+    if not args.yes:
+        try:
+            if input("Proceed and spend this? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("Aborted.")
+                return 0
+        except EOFError:
+            log.error("No TTY for confirmation. Re-run with --yes to proceed non-interactively.")
+            return 1
+
+    try:
+        client = create_client(settings)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 1
+
+    cache = EnrichmentCache(Paths.enrichment_cache(profile.key))
+
+    if args.batch:
+        batch_id, group_map = submit_batch(
+            frame, taxonomy, profile, client, args.reviews_per_request, effort=effort
+        )
+        print(f"  Batch submitted: {batch_id}")
+        print("  Polling every 60s. Most batches finish within an hour; safe to Ctrl-C —")
+        print(f"  the batch keeps running and can be collected later with id {batch_id}.")
+
+        def report(batch) -> None:
+            counts = batch.request_counts
+            print(f"    status={batch.processing_status} "
+                  f"succeeded={counts.succeeded} errored={counts.errored} "
+                  f"processing={counts.processing}")
+
+        poll_batch(client, batch_id, on_poll=report)
+        result = collect_batch_results(
+            client, batch_id, frame, group_map, taxonomy, cache=cache, profile=profile
+        )
+    else:
+        def progress(done: int, total: int) -> None:
+            print(f"    request {done}/{total}", end="\r", flush=True)
+
+        result = enrich_sync(
+            frame, taxonomy, profile, client,
+            reviews_per_request=args.reviews_per_request,
+            cache=cache, progress=progress, effort=effort,
+        )
+        print()
+
+    cache.save()
+
+    reviews, labels = to_dataframes(result, frame)
+    report = build_run_report(result, frame, profile, args.batch)
+
+    if not reviews.empty:
+        reviews.to_parquet(Paths.enriched_reviews, index=False)
+    if not labels.empty:
+        labels.to_parquet(Paths.enriched_labels, index=False)
+    Paths.enrichment_report.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    grounding = report["grounding"]
+    print()
+    print("=" * 78)
+    print("  ENRICHMENT COMPLETE")
+    print("=" * 78)
+    print(f"  Enriched         : {report['reviews_enriched']:,} / {report['reviews_requested']:,} "
+          f"({report['coverage_pct']:.1f}%)")
+    print(f"  Labels produced  : {len(labels):,}  "
+          f"({len(labels) / max(1, len(reviews)):.2f} areas per review)")
+    print(f"  Requests / cache : {report['requests_made']} made, {report['cache_hits']} reused")
+    if grounding["mean_rate"] is not None:
+        print(f"  Evidence grounded: {grounding['mean_rate'] * 100:.1f}% of spans verified verbatim")
+        print(f"                     {grounding['fully_grounded_pct']:.1f}% of reviews fully grounded")
+    if report["issue_counts"]:
+        print(f"  Validation issues: {report['issue_counts']}")
+    else:
+        print("  Validation issues: none")
+    if report["failed_review_ids"]:
+        print(f"  FAILED           : {len(report['failed_review_ids'])} review(s) — see report JSON")
+    usage = report["usage"]
+    if usage:
+        print(f"  Tokens           : {usage.get('input_tokens', 0):,} in / "
+              f"{usage.get('output_tokens', 0):,} out | "
+              f"cache read {usage.get('cache_read_input_tokens', 0):,}")
+    print("-" * 78)
+    print(f"  Reviews : {Paths.enriched_reviews}")
+    print(f"  Labels  : {Paths.enriched_labels}")
+    print(f"  Report  : {Paths.enrichment_report}")
+    print("=" * 78)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

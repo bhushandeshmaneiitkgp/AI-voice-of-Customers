@@ -1,0 +1,544 @@
+"""
+Layer 4 -- AI enrichment orchestration.
+
+Turns cleaned reviews into validated, evidence-backed structured labels.
+
+The pipeline is defensive at every step, because the failure mode that matters
+is not a crash — it is a plausible-looking dataset that is quietly wrong:
+
+    group reviews -> call model -> parse JSON -> validate schema
+      -> validate against taxonomy -> verify evidence spans
+      -> reconcile returned ids against requested ids
+      -> retry anything missing, individually
+
+Reviews are grouped to amortise the taxonomy prompt, but every returned
+``review_id`` is reconciled against what was requested. A group where the model
+skips a review, or invents one, is detected rather than silently shifting labels
+onto the wrong rows.
+
+Results are cached to disk keyed by review + model + prompt version, so an
+interrupted run resumes instead of re-billing work already done.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+import pandas as pd
+from pydantic import ValidationError
+
+from config.settings import ModelProfile
+from voc.enrichment_schemas import (
+    EnrichmentBatchResponse,
+    ReviewEnrichment,
+    ValidationIssue,
+    build_response_schema,
+    validate_against_taxonomy,
+    verify_grounding,
+)
+from voc.llm import (
+    DEFAULT_REVIEWS_PER_REQUEST,
+    build_request_params,
+    extract_json_text,
+    describe_usage,
+)
+from voc.prompts import build_system_prompt, build_user_message
+from voc.taxonomy import Taxonomy
+
+logger = logging.getLogger(__name__)
+
+#: Bump when the prompt or schema changes in a way that invalidates cached
+#: responses. Part of the cache key, so old entries are simply not reused.
+PROMPT_VERSION = "v1"
+
+
+@dataclass
+class EnrichmentResult:
+    """Everything one run produced, including what went wrong."""
+
+    enrichments: list[ReviewEnrichment] = field(default_factory=list)
+    issues: list[ValidationIssue] = field(default_factory=list)
+    failed_review_ids: list[str] = field(default_factory=list)
+    grounding_rates: dict[str, float] = field(default_factory=dict)
+    usage: dict[str, int] = field(default_factory=dict)
+    requests_made: int = 0
+    cache_hits: int = 0
+
+    @property
+    def enriched_ids(self) -> set[str]:
+        return {item.review_id for item in self.enrichments}
+
+    def merge(self, other: "EnrichmentResult") -> None:
+        self.enrichments.extend(other.enrichments)
+        self.issues.extend(other.issues)
+        self.failed_review_ids.extend(other.failed_review_ids)
+        self.grounding_rates.update(other.grounding_rates)
+        self.requests_made += other.requests_made
+        self.cache_hits += other.cache_hits
+        for key, value in other.usage.items():
+            self.usage[key] = self.usage.get(key, 0) + value
+
+
+# ---------------------------------------------------------------------------
+# Grouping and caching
+# ---------------------------------------------------------------------------
+
+
+def chunk_reviews(
+    frame: pd.DataFrame, size: int = DEFAULT_REVIEWS_PER_REQUEST
+) -> Iterator[pd.DataFrame]:
+    """Yield consecutive groups of reviews to send per request."""
+    if size < 1:
+        raise ValueError(f"reviews_per_request must be >= 1, got {size}")
+    for start in range(0, len(frame), size):
+        yield frame.iloc[start : start + size]
+
+
+def cache_key(review_id: str, profile: ModelProfile) -> str:
+    """Cache identity: the review, the model, and the prompt version.
+
+    Changing any of the three should produce a different label, so all three
+    are in the key. A cache that ignores the model would serve Haiku's answers
+    for an Opus run and quietly invalidate the whole benchmark.
+    """
+    payload = f"{review_id}|{profile.model_id}|{PROMPT_VERSION}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:20]
+
+
+class EnrichmentCache:
+    """Disk cache of validated enrichments, one JSON file per run configuration."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._entries: dict[str, dict[str, Any]] = {}
+        if path.exists():
+            try:
+                self._entries = json.loads(path.read_text(encoding="utf-8"))
+                logger.info("Loaded %d cached enrichments from %s", len(self._entries), path.name)
+            except json.JSONDecodeError:
+                logger.warning("Cache at %s is corrupt; starting empty.", path)
+
+    def get(self, key: str) -> ReviewEnrichment | None:
+        raw = self._entries.get(key)
+        if raw is None:
+            return None
+        try:
+            return ReviewEnrichment(**raw)
+        except ValidationError:
+            # A cache entry written by an older schema is not an error; it just
+            # cannot be reused.
+            return None
+
+    def put(self, key: str, enrichment: ReviewEnrichment) -> None:
+        self._entries[key] = enrichment.model_dump()
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+        logger.info("Wrote %d cached enrichments to %s", len(self._entries), self.path.name)
+
+
+# ---------------------------------------------------------------------------
+# Response handling
+# ---------------------------------------------------------------------------
+
+
+def parse_and_validate(
+    payload: str,
+    requested: pd.DataFrame,
+    taxonomy: Taxonomy,
+) -> EnrichmentResult:
+    """Parse a model response and run every check against it.
+
+    Reconciles returned ids against requested ids in both directions: a missing
+    review is queued for retry, and an id that was never requested is discarded
+    with an issue recorded rather than written into the dataset.
+    """
+    result = EnrichmentResult()
+
+    try:
+        parsed = EnrichmentBatchResponse(**json.loads(payload))
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.warning("Unparseable response for %d review(s): %s", len(requested), exc)
+        result.failed_review_ids.extend(requested["review_id"].tolist())
+        result.issues.append(
+            ValidationIssue(
+                review_id="<group>",
+                kind="unparseable_response",
+                detail=str(exc)[:300],
+            )
+        )
+        return result
+
+    requested_ids = set(requested["review_id"])
+    text_by_id = dict(zip(requested["review_id"], requested["review_text"]))
+    seen: set[str] = set()
+
+    for enrichment in parsed.results:
+        if enrichment.review_id not in requested_ids:
+            result.issues.append(
+                ValidationIssue(
+                    review_id=enrichment.review_id,
+                    kind="unexpected_review_id",
+                    detail="Model returned an id that was not requested; discarded.",
+                )
+            )
+            continue
+        if enrichment.review_id in seen:
+            result.issues.append(
+                ValidationIssue(
+                    review_id=enrichment.review_id,
+                    kind="duplicate_review_id",
+                    detail="Model returned the same review twice; kept the first.",
+                )
+            )
+            continue
+        seen.add(enrichment.review_id)
+
+        result.issues.extend(validate_against_taxonomy(enrichment, taxonomy))
+        grounding_issues, rate = verify_grounding(
+            enrichment, text_by_id[enrichment.review_id]
+        )
+        result.issues.extend(grounding_issues)
+        result.grounding_rates[enrichment.review_id] = rate
+        result.enrichments.append(enrichment)
+
+    missing = requested_ids - seen
+    if missing:
+        logger.warning("Model omitted %d of %d requested review(s)", len(missing), len(requested))
+        result.failed_review_ids.extend(sorted(missing))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Synchronous path
+# ---------------------------------------------------------------------------
+
+
+def enrich_sync(
+    frame: pd.DataFrame,
+    taxonomy: Taxonomy,
+    profile: ModelProfile,
+    client: Any,
+    reviews_per_request: int = DEFAULT_REVIEWS_PER_REQUEST,
+    cache: EnrichmentCache | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    retry_missing: bool = True,
+    effort: str | None = None,
+) -> EnrichmentResult:
+    """Enrich reviews with immediate API calls.
+
+    Used for samples, smoke tests, and evaluation runs where waiting on a batch
+    would slow the loop down. The full corpus goes through ``enrich_batch``.
+    """
+    system_prompt = build_system_prompt(taxonomy)
+    schema = build_response_schema(taxonomy)
+    result = EnrichmentResult()
+
+    pending = frame
+    if cache is not None:
+        cached_rows, uncached = [], []
+        for _, row in frame.iterrows():
+            hit = cache.get(cache_key(row["review_id"], profile))
+            if hit is not None:
+                cached_rows.append(hit)
+            else:
+                uncached.append(row["review_id"])
+        if cached_rows:
+            result.enrichments.extend(cached_rows)
+            result.cache_hits = len(cached_rows)
+            logger.info("Reused %d cached enrichment(s)", len(cached_rows))
+        pending = frame[frame["review_id"].isin(uncached)]
+
+    groups = list(chunk_reviews(pending, reviews_per_request))
+    for index, group in enumerate(groups, start=1):
+        params = build_request_params(
+            profile, system_prompt, build_user_message(group), schema, effort=effort
+        )
+        try:
+            message = client.messages.create(**params)
+        except Exception as exc:  # noqa: BLE001 - recorded, run continues
+            logger.error("Request failed for %d review(s): %s", len(group), exc)
+            result.failed_review_ids.extend(group["review_id"].tolist())
+            result.issues.append(
+                ValidationIssue(
+                    review_id="<group>", kind="api_error", detail=str(exc)[:300]
+                )
+            )
+            continue
+
+        result.requests_made += 1
+        for key, value in describe_usage(message).items():
+            result.usage[key] = result.usage.get(key, 0) + value
+
+        group_result = parse_and_validate(extract_json_text(message), group, taxonomy)
+        result.merge(group_result)
+
+        if cache is not None:
+            for enrichment in group_result.enrichments:
+                cache.put(cache_key(enrichment.review_id, profile), enrichment)
+
+        if progress:
+            progress(index, len(groups))
+
+    # A review the model skipped in a group usually succeeds on its own, so
+    # retry individually rather than losing it.
+    if retry_missing and result.failed_review_ids:
+        retry_ids = list(dict.fromkeys(result.failed_review_ids))
+        retry_frame = frame[frame["review_id"].isin(retry_ids)]
+        if not retry_frame.empty:
+            logger.info("Retrying %d review(s) individually", len(retry_frame))
+            result.failed_review_ids = []
+            retry_result = enrich_sync(
+                retry_frame,
+                taxonomy,
+                profile,
+                client,
+                reviews_per_request=1,
+                cache=cache,
+                retry_missing=False,
+                effort=effort,
+            )
+            result.merge(retry_result)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Batch path
+# ---------------------------------------------------------------------------
+
+
+def submit_batch(
+    frame: pd.DataFrame,
+    taxonomy: Taxonomy,
+    profile: ModelProfile,
+    client: Any,
+    reviews_per_request: int = DEFAULT_REVIEWS_PER_REQUEST,
+    effort: str | None = None,
+) -> tuple[str, dict[str, list[str]]]:
+    """Submit the corpus as one Batch API job.
+
+    Returns the batch id and a mapping of ``custom_id`` to the review ids in
+    that group, which is what lets results be reconciled on retrieval.
+    """
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+    from anthropic.types.messages.batch_create_params import Request
+
+    system_prompt = build_system_prompt(taxonomy)
+    schema = build_response_schema(taxonomy)
+
+    requests: list[Request] = []
+    group_map: dict[str, list[str]] = {}
+
+    for index, group in enumerate(chunk_reviews(frame, reviews_per_request)):
+        custom_id = f"group-{index:05d}"
+        group_map[custom_id] = group["review_id"].tolist()
+        params = build_request_params(
+            profile, system_prompt, build_user_message(group), schema, effort=effort
+        )
+        requests.append(
+            Request(custom_id=custom_id, params=MessageCreateParamsNonStreaming(**params))
+        )
+
+    batch = client.messages.batches.create(requests=requests)
+    logger.info(
+        "Submitted batch %s: %d requests covering %d reviews",
+        batch.id, len(requests), len(frame),
+    )
+    return batch.id, group_map
+
+
+def poll_batch(
+    client: Any,
+    batch_id: str,
+    interval_seconds: int = 60,
+    timeout_seconds: int = 24 * 3600,
+    on_poll: Callable[[Any], None] | None = None,
+) -> Any:
+    """Block until a batch finishes. Most complete well inside an hour."""
+    started = time.monotonic()
+    while True:
+        batch = client.messages.batches.retrieve(batch_id)
+        if on_poll:
+            on_poll(batch)
+        if batch.processing_status == "ended":
+            return batch
+        if time.monotonic() - started > timeout_seconds:
+            raise TimeoutError(
+                f"Batch {batch_id} still {batch.processing_status} after "
+                f"{timeout_seconds}s. It keeps running; retrieve it later with its id."
+            )
+        time.sleep(interval_seconds)
+
+
+def collect_batch_results(
+    client: Any,
+    batch_id: str,
+    frame: pd.DataFrame,
+    group_map: dict[str, list[str]],
+    taxonomy: Taxonomy,
+    cache: EnrichmentCache | None = None,
+    profile: ModelProfile | None = None,
+) -> EnrichmentResult:
+    """Retrieve, parse, and validate every result in a finished batch.
+
+    Results arrive in arbitrary order, so everything is keyed by ``custom_id``
+    and never by position.
+    """
+    result = EnrichmentResult()
+    by_id = frame.set_index("review_id")
+
+    for entry in client.messages.batches.results(batch_id):
+        review_ids = group_map.get(entry.custom_id, [])
+        if not review_ids:
+            result.issues.append(
+                ValidationIssue(
+                    review_id="<group>",
+                    kind="unknown_custom_id",
+                    detail=f"Batch returned unrecognised custom_id {entry.custom_id!r}",
+                )
+            )
+            continue
+
+        requested = by_id.loc[by_id.index.intersection(review_ids)].reset_index()
+
+        outcome = entry.result.type
+        if outcome != "succeeded":
+            detail = outcome
+            if outcome == "errored":
+                detail = f"errored: {getattr(entry.result.error, 'type', 'unknown')}"
+            logger.warning("Batch entry %s %s", entry.custom_id, detail)
+            result.failed_review_ids.extend(review_ids)
+            result.issues.append(
+                ValidationIssue(review_id="<group>", kind="batch_failure", detail=detail)
+            )
+            continue
+
+        result.requests_made += 1
+        for key, value in describe_usage(entry.result.message).items():
+            result.usage[key] = result.usage.get(key, 0) + value
+
+        group_result = parse_and_validate(
+            extract_json_text(entry.result.message), requested, taxonomy
+        )
+        result.merge(group_result)
+
+        if cache is not None and profile is not None:
+            for enrichment in group_result.enrichments:
+                cache.put(cache_key(enrichment.review_id, profile), enrichment)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Output shaping
+# ---------------------------------------------------------------------------
+
+
+def to_dataframes(
+    result: EnrichmentResult, frame: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Flatten enrichments into two tidy tables.
+
+    Long-format labels (one row per review-area) rather than a wide table with
+    list columns, because every downstream question — frequency by area,
+    platform comparison, trend by month — is a ``groupby`` on this shape.
+    """
+    review_rows: list[dict[str, Any]] = []
+    label_rows: list[dict[str, Any]] = []
+
+    for enrichment in result.enrichments:
+        review_rows.append(
+            {
+                "review_id": enrichment.review_id,
+                "sentiment": enrichment.sentiment,
+                "severity": enrichment.severity,
+                "customer_intent": enrichment.customer_intent,
+                "support_escalation": enrichment.support_escalation,
+                "pain_point": enrichment.pain_point,
+                "n_areas": len(enrichment.areas),
+                "overall_confidence": enrichment.overall_confidence,
+                "grounding_rate": result.grounding_rates.get(enrichment.review_id, 1.0),
+            }
+        )
+        for label in enrichment.areas:
+            label_rows.append(
+                {
+                    "review_id": enrichment.review_id,
+                    "product_area": label.product_area,
+                    "issue_type": label.issue_type,
+                    "strength_type": label.strength_type,
+                    "polarity": "issue" if label.issue_type else "strength",
+                    "evidence_span": label.evidence_span,
+                    "confidence": label.confidence,
+                }
+            )
+
+    reviews = pd.DataFrame(review_rows)
+    labels = pd.DataFrame(label_rows)
+
+    # Carry the deterministic columns through so downstream analysis never has
+    # to re-join, and never has to ask the model for a fact we already know.
+    carry = frame[
+        [
+            "review_id", "platform", "rating", "rating_bucket", "review_date",
+            "year_month", "review_text", "is_truncated", "near_dup_group_id",
+            "is_near_dup_representative", "in_comparable_window",
+        ]
+    ]
+    if not reviews.empty:
+        reviews = carry.merge(reviews, on="review_id", how="inner")
+    if not labels.empty:
+        labels = labels.merge(
+            carry[["review_id", "platform", "rating", "year_month", "in_comparable_window"]],
+            on="review_id",
+            how="left",
+        )
+
+    return reviews, labels
+
+
+def build_run_report(
+    result: EnrichmentResult,
+    frame: pd.DataFrame,
+    profile: ModelProfile,
+    use_batch: bool,
+) -> dict[str, Any]:
+    """Summarise a run: coverage, quality, and cost. Written to JSON."""
+    issue_counts: dict[str, int] = {}
+    for issue in result.issues:
+        issue_counts[issue.kind] = issue_counts.get(issue.kind, 0) + 1
+
+    rates = list(result.grounding_rates.values())
+    fully_grounded = sum(1 for rate in rates if rate >= 1.0)
+
+    return {
+        "model": profile.model_id,
+        "model_key": profile.key,
+        "prompt_version": PROMPT_VERSION,
+        "transport": "batch" if use_batch else "sync",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "reviews_requested": len(frame),
+        "reviews_enriched": len(result.enrichments),
+        "coverage_pct": round(len(result.enrichments) / max(1, len(frame)) * 100, 2),
+        "failed_review_ids": result.failed_review_ids,
+        "requests_made": result.requests_made,
+        "cache_hits": result.cache_hits,
+        "usage": result.usage,
+        "grounding": {
+            "mean_rate": round(sum(rates) / len(rates), 4) if rates else None,
+            "fully_grounded_reviews": fully_grounded,
+            "fully_grounded_pct": round(fully_grounded / len(rates) * 100, 2) if rates else None,
+        },
+        "issue_counts": issue_counts,
+        "issues_sample": [issue.model_dump() for issue in result.issues[:40]],
+    }

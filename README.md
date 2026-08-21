@@ -6,7 +6,7 @@ product opportunities, RICE prioritisation, and experiment plans.
 
 > **Status: Phases 1–3 of 10 complete.** Data foundation, the corpus-derived
 > product taxonomy, full exploratory analysis, and the AI enrichment pipeline are
-> built and verified, with **257 passing tests**. RAG, LangGraph orchestration, and
+> built and verified, with **291 passing tests**. RAG, LangGraph orchestration, and
 > the Streamlit UI are scheduled — see [Roadmap](#roadmap).
 >
 > Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
@@ -277,6 +277,38 @@ every returned `review_id` is reconciled against what was requested in **both**
 directions. A skipped review is retried individually; an id that was never requested
 is discarded. Without that check, one omission would silently shift every label in the
 group onto the wrong rows.
+
+### The corpus is configuration, not code
+
+Three things are properties of a *dataset* rather than of the pipeline, and all
+three live in [`config/dataset.yaml`](config/dataset.yaml):
+
+```yaml
+platforms:                       # the complete set of valid `platform` values
+  - {id: blinkit, display_name: Blinkit}
+date_formats: ["%d %B %Y"]       # strptime patterns, tried in order
+domain:
+  description: Indian quick-commerce grocery apps   # goes into the LLM prompt
+```
+
+Point `VOC_DATASET_CONFIG` at a different file and another business's reviews run
+through the same ingestion, cleaning and enrichment with no code change:
+
+```bash
+VOC_DATASET_CONFIG=config/dataset_othercorp.yaml python scripts/01_build_clean.py
+```
+
+**This makes validation configurable, not optional** — the distinction that matters.
+An undeclared platform is still rejected; a date matching no declared format is still
+an error rather than a silently dropped row. What changed is that strictness now
+travels with the dataset instead of being frozen to one of them. Under a food-delivery
+profile, `swiggy` is accepted and `blinkit` is rejected — the exact inverse of the
+shipped config, which a merely-permissive implementation could not do.
+
+The domain description matters most for the LLM. Naming one industry in Python would
+mean the model is told it is reading that industry's reviews regardless of what it was
+handed, biasing every label invisibly. A test asserts no brand name appears in
+`prompts.py`.
 
 ### One adapter reaches every open-source provider
 

@@ -37,6 +37,7 @@ import hashlib
 import logging
 import re
 import unicodedata
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -47,7 +48,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from voc.schemas import (
     COMPARABLE_WINDOW_START,
-    RAW_DATE_FORMAT,
+    accepted_date_formats,
     CleaningReport,
     CleanReview,
     RatingBucket,
@@ -90,13 +91,26 @@ def make_review_id(platform: str, date_iso: str, rating: int, text: str) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
-def parse_review_date(value: str) -> date:
-    """Parse the source date format, e.g. ``"30 December 2024"``.
+def parse_review_date(value: str, formats: Sequence[str] | None = None) -> date:
+    """Parse a source date against the dataset's declared formats, in order.
 
-    Strict by design. 100% of the source rows match this one format, so a
-    failure means the data changed and we want to know immediately.
+    Strict by design, and still strict now that the format list is configurable:
+    a value matching none of the declared patterns raises rather than being
+    coerced or skipped. The error names every pattern tried, because the usual
+    cause is a corpus whose ``date_formats`` need declaring in
+    ``config/dataset.yaml`` -- not a corrupt row.
     """
-    return datetime.strptime(value.strip(), RAW_DATE_FORMAT).date()
+    patterns = tuple(formats) if formats is not None else accepted_date_formats()
+    text = value.strip()
+    for pattern in patterns:
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    raise ValueError(
+        f"Date {value!r} matches none of the configured formats {patterns}. "
+        "Declare the corpus's format under `date_formats:` in config/dataset.yaml."
+    )
 
 
 def detect_truncation(text: str, cap_chars: int, tolerance: int) -> bool:

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -43,6 +43,7 @@ class Paths:
     config_dir = PROJECT_ROOT / "config"
     model_registry = PROJECT_ROOT / "config" / "models.yaml"
     taxonomy = PROJECT_ROOT / "config" / "taxonomy.yaml"
+    dataset_config = PROJECT_ROOT / "config" / "dataset.yaml"
 
     docs_dir = PROJECT_ROOT / "docs"
 
@@ -88,6 +89,117 @@ class Paths:
             cls.figures_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Dataset profile
+# ---------------------------------------------------------------------------
+
+
+class PlatformSpec(BaseModel):
+    """One competitor/source the dataset covers."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str = Field(..., pattern=r"^[a-z][a-z0-9_]*$")
+    display_name: str
+
+
+class DomainSpec(BaseModel):
+    """What this corpus is about, in the words the LLM prompt needs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    description: str = Field(..., min_length=3)
+    entity_noun: str = "platform"
+    reviewer_context: str = ""
+
+
+class DatasetConfig(BaseModel):
+    """The dataset-specific half of the pipeline, loaded from config/dataset.yaml.
+
+    Three things live here because they are properties of a *corpus*, not of the
+    pipeline: which platforms exist, how its dates are written, and what domain
+    the reviews come from. Everything else in the codebase is domain-agnostic.
+
+    This makes validation configurable, not optional. An unlisted platform is
+    still rejected; an unparseable date is still an error. What changes is that
+    the allowed set travels with the dataset instead of being frozen in Python.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(..., pattern=r"^[a-z][a-z0-9_]*$")
+    display_name: str
+    description: str = ""
+    platforms: list[PlatformSpec] = Field(..., min_length=1)
+    date_formats: list[str] = Field(..., min_length=1)
+    domain: DomainSpec
+
+    @field_validator("date_formats")
+    @classmethod
+    def _formats_are_usable(cls, values: list[str]) -> list[str]:
+        """Reject a pattern strptime cannot use, at load time rather than row 4,000."""
+        from datetime import datetime
+
+        for pattern in values:
+            try:
+                datetime.strptime(datetime(2024, 12, 30).strftime(pattern), pattern)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"date_format {pattern!r} is not a usable strptime pattern: {exc}")
+        return values
+
+    @model_validator(mode="after")
+    def _platform_ids_unique(self) -> "DatasetConfig":
+        ids = [platform.id for platform in self.platforms]
+        duplicates = {i for i in ids if ids.count(i) > 1}
+        if duplicates:
+            raise ValueError(f"Duplicate platform ids: {sorted(duplicates)}")
+        return self
+
+    @property
+    def platform_ids(self) -> tuple[str, ...]:
+        """Canonical ids, sorted so error messages and reports are stable."""
+        return tuple(sorted(platform.id for platform in self.platforms))
+
+    @property
+    def platform_display_names(self) -> tuple[str, ...]:
+        return tuple(platform.display_name for platform in self.platforms)
+
+    def display_name_for(self, platform_id: str) -> str:
+        for platform in self.platforms:
+            if platform.id == platform_id:
+                return platform.display_name
+        return platform_id
+
+
+def load_dataset_config(path: Path | None = None) -> DatasetConfig:
+    """Read and validate ``config/dataset.yaml``."""
+    config_path = path or Paths.dataset_config
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Dataset config not found at {config_path}. It declares the platforms, "
+            "date formats and domain for the corpus being processed."
+        )
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not raw:
+        raise ValueError(f"{config_path} is empty")
+    return DatasetConfig(**raw)
+
+
+@lru_cache(maxsize=1)
+def get_dataset_config() -> DatasetConfig:
+    """Cached dataset profile.
+
+    Honours ``VOC_DATASET_CONFIG`` so another corpus can be processed by
+    pointing at a different YAML file, with no code change::
+
+        VOC_DATASET_CONFIG=config/dataset_othercorp.yaml python scripts/01_build_clean.py
+    """
+    import os
+
+    override = os.environ.get("VOC_DATASET_CONFIG")
+    return load_dataset_config(Path(override) if override else None)
 
 
 # ---------------------------------------------------------------------------

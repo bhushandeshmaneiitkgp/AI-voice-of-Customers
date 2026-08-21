@@ -9,7 +9,7 @@
 | Size | 1,898,980 bytes |
 | Records | **4,620** |
 | Columns | 4 |
-| Profiled at | 2026-08-21T15:56:43+00:00 UTC |
+| Profiled at | 2026-08-21T23:19:44+00:00 UTC |
 
 ## 1. Columns and completeness
 

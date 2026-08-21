@@ -1,0 +1,80 @@
+# =============================================================================
+# Dataset profile
+#
+# The three things that are specific to *this* corpus rather than to the
+# pipeline. Everything else -- cleaning, near-duplicate detection, enrichment,
+# validation, grounding, the provider layer -- is domain-agnostic and needs no
+# change to process a different business's reviews.
+#
+# To onboard another business, copy this file, edit the three sections below,
+# and point VOC_DATASET_CONFIG at it. No Python changes.
+#
+# -----------------------------------------------------------------------------
+# VALIDATION STAYS STRICT.
+#
+# This file does not loosen any check; it makes the checks *configurable*.
+# A platform outside `platforms` is still rejected at ingestion. A date that
+# matches none of `date_formats` is still an error. The difference is that the
+# allowed set is declared as data rather than frozen in Python, so strictness
+# travels with the dataset instead of being hardcoded to one of them.
+# =============================================================================
+
+name: quickcommerce_in
+display_name: Indian Quick-Commerce
+description: >
+  Customer reviews of Indian quick-commerce grocery delivery apps, collected
+  from public app-store listings.
+
+# -----------------------------------------------------------------------------
+# 1. Platforms
+#
+# The complete set of values the `platform` column may contain. Ingestion
+# rejects anything else, with a message naming the allowed values -- so a
+# typo or an unexpected new brand fails loudly rather than creating a silent
+# one-row category.
+#
+# `id` is the canonical lowercase value stored in the dataset.
+# `display_name` is used only for human-facing text (the LLM prompt, reports).
+# -----------------------------------------------------------------------------
+platforms:
+  - id: blinkit
+    display_name: Blinkit
+  - id: jiomart
+    display_name: JioMart
+  - id: zepto
+    display_name: Zepto
+
+# -----------------------------------------------------------------------------
+# 2. Date formats
+#
+# Python strptime patterns, tried in order until one parses. A date matching
+# none of them is a hard error, not a silently dropped row.
+#
+# Deliberately ONE entry: this corpus uses "30 December 2024" exclusively, and
+# declaring formats it does not contain would widen what ingestion accepts for
+# no benefit. Configurability is proven by a *different* corpus declaring its
+# own list, not by pre-loading extras here.
+#
+# A second corpus adds its format to its own dataset.yaml, e.g.
+#   date_formats: ["%Y-%m-%d"]
+# -----------------------------------------------------------------------------
+date_formats:
+  - "%d %B %Y"     # 30 December 2024
+
+# -----------------------------------------------------------------------------
+# 3. Domain description
+#
+# Injected verbatim into the LLM classification prompt. Without this the model
+# would be told it is reading quick-commerce grocery reviews regardless of what
+# it was actually given, which biases every label for another business.
+#
+# `description` completes the sentence: "classifying customer reviews of ___".
+# `entity_noun` is what one competitor is called in this domain (platform,
+# vendor, store, provider, brand...).
+# -----------------------------------------------------------------------------
+domain:
+  description: Indian quick-commerce grocery apps
+  entity_noun: platform
+  reviewer_context: >
+    Reviews are written by customers of on-demand grocery delivery apps and
+    mix app problems with operational ones (delivery, refunds, order accuracy).

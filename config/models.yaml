@@ -1,0 +1,87 @@
+# =============================================================================
+# Model registry  (Decision 1: configurable enrichment model, never hardcoded)
+#
+# Selection happens via environment variables, not code:
+#     VOC_ENRICHMENT_MODEL=haiku   # the 4,620-review classification pass
+#     VOC_SYNTHESIS_MODEL=opus     # low-volume reasoning nodes
+#
+# This lets us run the SAME pipeline under different models and score each one
+# against the gold evaluation set in Phase 9. The cost/quality comparison then
+# becomes a documented result in EVALUATION.md rather than an untested guess.
+#
+# Prices are Anthropic first-party API rates in USD per million tokens.
+# `batch_discount: 0.5` reflects the Batch API's 50% discount.
+# Verify current pricing at https://www.anthropic.com/pricing before quoting.
+# Pricing snapshot taken: 2026-08-21
+# =============================================================================
+
+default_enrichment: opus
+default_synthesis: opus
+
+profiles:
+
+  opus:
+    model_id: claude-opus-5
+    display_name: Claude Opus 5
+    tier: frontier
+    context_window: 1000000
+    input_price_per_mtok: 5.00
+    output_price_per_mtok: 25.00
+    batch_discount: 0.5
+    # Thinking is ON by default on Opus 5; effort controls depth.
+    thinking_style: adaptive
+    supports_effort: true
+    default_effort: high
+    notes: >
+      Highest quality. Default for synthesis nodes (root cause, opportunities,
+      product brief) where reasoning quality directly drives output quality.
+
+  sonnet:
+    model_id: claude-sonnet-5
+    display_name: Claude Sonnet 5
+    tier: balanced
+    context_window: 1000000
+    input_price_per_mtok: 3.00
+    output_price_per_mtok: 15.00
+    batch_discount: 0.5
+    thinking_style: adaptive
+    supports_effort: true
+    default_effort: high
+    notes: >
+      Balanced cost/quality. Introductory pricing of $2.00/$10.00 per MTok
+      applies through 2026-08-31; the figures above are the standard rates,
+      so cost estimates are conservative rather than optimistic.
+
+  haiku:
+    model_id: claude-haiku-4-5
+    display_name: Claude Haiku 4.5
+    tier: fast
+    context_window: 200000
+    input_price_per_mtok: 1.00
+    output_price_per_mtok: 5.00
+    batch_discount: 0.5
+    # Haiku 4.5 predates adaptive thinking: it uses an explicit token budget,
+    # and passing `effort` to it returns a 400. Phase 3 branches on these flags.
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Cheapest option. Strong candidate for the high-volume, schema-constrained
+      per-review classification pass. Must be validated against gold labels
+      before being trusted — that validation is the point of this registry.
+
+  opus_4_8:
+    model_id: claude-opus-4-8
+    display_name: Claude Opus 4.8
+    tier: frontier
+    context_window: 1000000
+    input_price_per_mtok: 5.00
+    output_price_per_mtok: 25.00
+    batch_discount: 0.5
+    # On Opus 4.8, omitting `thinking` runs WITHOUT thinking — must set it.
+    thinking_style: adaptive
+    supports_effort: true
+    default_effort: high
+    notes: >
+      Previous-generation frontier model. Kept as a control arm so the
+      evaluation can show whether the newer model actually helps this task.

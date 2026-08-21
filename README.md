@@ -5,9 +5,12 @@ into evidence-backed product insights: recurring pain points, supporting evidenc
 product opportunities, RICE prioritisation, and experiment plans.
 
 > **Status: Phases 1–2 of 10 complete.** Data foundation (ingestion, cleaning,
-> profiling) and the corpus-derived product taxonomy are built and verified,
-> with 140 passing tests. AI enrichment, RAG, LangGraph orchestration, and the
-> Streamlit UI are scheduled — see [Roadmap](#roadmap).
+> profiling), the corpus-derived product taxonomy, and full exploratory analysis
+> are built and verified, with **173 passing tests**. AI enrichment, RAG, LangGraph
+> orchestration, and the Streamlit UI are scheduled — see [Roadmap](#roadmap).
+>
+> Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
+> summary) · [`docs/TAXONOMY.md`](docs/TAXONOMY.md) · [`reports/EDA_REPORT.md`](reports/EDA_REPORT.md)
 
 ---
 
@@ -80,6 +83,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 2 | Data cleaning | `src/voc/clean.py` | ✅ Phase 1 |
 | 3 | Profiling / EDA | `src/voc/profiling.py` | ✅ Phase 1 |
 | 3b | Taxonomy discovery | `src/voc/taxonomy.py`, `discovery.py` | ✅ Phase 2 |
+| 3c | EDA + figures | `src/voc/eda.py`, `plots.py` | ✅ Phase 2 |
 | 4 | AI enrichment | `src/voc/enrich.py` | Phase 3 |
 | 5 | Pain-point discovery | `src/voc/painpoints.py` | Phase 4 |
 | 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | Phase 4 |
@@ -143,6 +147,10 @@ python scripts/01_build_clean.py
 python scripts/02_discover_taxonomy.py
 ```
 
+```bash
+python scripts/03_run_eda.py
+```
+
 Run the tests:
 
 ```bash
@@ -192,6 +200,22 @@ sits on a plateau rather than a cliff:
 |---|---|---|---|---|
 | Reviews flagged | 53 (1.1%) | 50 (1.1%) | 49 (1.1%) | 35 (0.8%) |
 | Largest group | 18 | 15 | 10 | 7 |
+
+### Sampling pattern is not customer behaviour
+
+Review volume rises 26× from July to December 2024. That is the shape of the scrape,
+not a demand curve, and treating it as growth is the easiest way to get a confident
+wrong answer out of this dataset. Every temporal view reports normalised shares.
+
+EDA turned this from a caveat into a **measured finding**: restricting to the only
+window where all three platforms are present, **JioMart and Zepto swap rating rank**
+(JioMart 1.50 → 1.64, moving above Zepto's 1.53). On the full corpus JioMart looks
+like the worst-rated platform; it is not. Its mean is dragged down by 165 pre-October
+reviews that no other platform has.
+
+So the comparison window is **mandatory, not advisory** — and a test asserts the
+confound so the finding cannot be quietly lost. Full analysis:
+[`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md).
 
 ### The taxonomy was discovered, not assumed
 
@@ -293,7 +317,7 @@ quickcommerce-voc-copilot/
 | Phase | Scope |
 |---|---|
 | ✅ 1 | Scaffold, ingestion, cleaning, profiling, tests |
-| ✅ 2 | Product-area taxonomy discovered and validated against the corpus |
+| ✅ 2 | Taxonomy discovery + full EDA, figures, and product intelligence summary |
 | 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
 | 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | 5 | Trend analysis + competitive metrics |

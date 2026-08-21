@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -96,6 +97,36 @@ def chunk_reviews(
         raise ValueError(f"reviews_per_request must be >= 1, got {size}")
     for start in range(0, len(frame), size):
         yield frame.iloc[start : start + size]
+
+
+def stratified_sample(
+    frame: pd.DataFrame,
+    n: int,
+    by: Sequence[str] = ("platform", "rating_bucket"),
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Proportional stratified sample that preserves every column.
+
+    Stratifying matters because the corpus is 77.6% negative: a uniform sample
+    of 100 would contain barely 20 positive reviews and would hardly exercise
+    the strength vocabulary at all.
+
+    Implemented with ``groupby().sample()`` rather than ``groupby().apply()``.
+    In pandas 3.0 ``apply`` operates on each group *excluding* the grouping
+    columns, so the obvious version silently returns a frame with no
+    ``platform`` column -- which then fails much later, while building a
+    request, looking like an API problem rather than a sampling one.
+    """
+    if n >= len(frame):
+        return frame.reset_index(drop=True)
+
+    fraction = n / len(frame)
+    sampled = frame.groupby(list(by), observed=True, group_keys=False).sample(
+        frac=fraction, random_state=seed
+    )
+    # Shuffle before truncating so trimming to exactly n does not favour
+    # whichever stratum happens to sort first.
+    return sampled.sample(frac=1.0, random_state=seed).head(n).reset_index(drop=True)
 
 
 def cache_key(review_id: str, profile: ModelProfile) -> str:

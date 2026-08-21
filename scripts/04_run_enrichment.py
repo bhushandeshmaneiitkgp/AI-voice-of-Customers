@@ -46,6 +46,7 @@ from voc.enrich import (
     collect_batch_results,
     enrich_sync,
     poll_batch,
+    stratified_sample,
     submit_batch,
     to_dataframes,
 )
@@ -104,14 +105,24 @@ def main() -> int:
         # Stratify by platform and rating bucket so a small sample still
         # contains positives and every platform -- a uniform sample of a 77.6%
         # negative corpus would barely exercise the strength vocabulary.
-        n = min(args.sample, len(frame))
-        frame = (
-            frame.groupby(["platform", "rating_bucket"], observed=True, group_keys=False)
-            .apply(lambda g: g.sample(max(1, round(n * len(g) / len(frame))), random_state=args.seed))
-            .head(n)
-            .reset_index(drop=True)
+        #
+        # Uses groupby().sample() rather than groupby().apply(): in pandas 3.0
+        # apply() operates on each group *excluding* the grouping columns, so
+        # the result silently loses `platform` and `rating_bucket`. sample()
+        # returns whole rows and keeps every column.
+        frame = stratified_sample(frame, args.sample, seed=args.seed)
+
+        missing = {"platform", "rating_bucket", "review_text", "review_id"} - set(frame.columns)
+        if missing:
+            log.error("Sampling dropped required column(s): %s", sorted(missing))
+            return 1
+
+        log.info(
+            "Stratified sample: %d reviews across %d platform(s), buckets=%s",
+            len(frame),
+            frame["platform"].nunique(),
+            dict(frame["rating_bucket"].value_counts()),
         )
-        log.info("Stratified sample: %d reviews", len(frame))
 
     system_prompt = build_system_prompt(taxonomy)
     effort = resolve_effort(profile, args.effort)

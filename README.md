@@ -4,9 +4,10 @@ Turns 4,620 unstructured customer reviews from **Blinkit**, **Zepto**, and **Jio
 into evidence-backed product insights: recurring pain points, supporting evidence,
 product opportunities, RICE prioritisation, and experiment plans.
 
-> **Status: Phase 1 of 10 complete.** Data foundation (ingestion, cleaning,
-> profiling, tests) is built and verified. AI enrichment, RAG, LangGraph
-> orchestration, and the Streamlit UI are scheduled — see [Roadmap](#roadmap).
+> **Status: Phases 1–2 of 10 complete.** Data foundation (ingestion, cleaning,
+> profiling) and the corpus-derived product taxonomy are built and verified,
+> with 140 passing tests. AI enrichment, RAG, LangGraph orchestration, and the
+> Streamlit UI are scheduled — see [Roadmap](#roadmap).
 
 ---
 
@@ -78,6 +79,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 1 | Data ingestion | `src/voc/ingest.py` | ✅ Phase 1 |
 | 2 | Data cleaning | `src/voc/clean.py` | ✅ Phase 1 |
 | 3 | Profiling / EDA | `src/voc/profiling.py` | ✅ Phase 1 |
+| 3b | Taxonomy discovery | `src/voc/taxonomy.py`, `discovery.py` | ✅ Phase 2 |
 | 4 | AI enrichment | `src/voc/enrich.py` | Phase 3 |
 | 5 | Pain-point discovery | `src/voc/painpoints.py` | Phase 4 |
 | 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | Phase 4 |
@@ -137,6 +139,10 @@ python scripts/00_profile_data.py
 python scripts/01_build_clean.py
 ```
 
+```bash
+python scripts/02_discover_taxonomy.py
+```
+
 Run the tests:
 
 ```bash
@@ -186,6 +192,32 @@ sits on a plateau rather than a cliff:
 |---|---|---|---|---|
 | Reviews flagged | 53 (1.1%) | 50 (1.1%) | 49 (1.1%) | 35 (0.8%) |
 | Largest group | 18 | 15 | 10 | 7 |
+
+### The taxonomy was discovered, not assumed
+
+The Phase 0 working hypothesis was 8 categories. Tested against the corpus it turned
+out to be too coarse in three places and missing four areas, so the final taxonomy has
+**15 product areas across 5 domains** — see [`docs/TAXONOMY.md`](docs/TAXONOMY.md).
+
+The most consequential finding: **`wallet_and_credits` was absent from the hypothesis
+and is the strongest platform discriminator in the whole corpus** — 27.9% of Zepto
+reviews versus 1.2% Blinkit, a 22.7× spread. Merged into "Payments & Pricing" as the
+hypothesis had it, a Zepto-specific trust crisis would have been averaged into a
+rounding error.
+
+Four concepts are kept deliberately separate, because collapsing them is what makes a
+taxonomy unusable: **product_area** (where), **issue_type / strength_type** (what went
+wrong or right there), **pain_point** (the specific instance, free text), and
+**attributes** (sentiment, severity, intent, support escalation). An area is
+polarity-neutral — a category named "Delivery Problems" cannot represent the 31% of
+positive reviews that say delivery is the best thing about the app.
+
+Discovery also showed support is **downstream**: P(support mentioned | order fulfilment
+failure) is 48% against a 29.1% base rate, while pricing complaints sit at 19.2%.
+People do not contact support because support is bad; they contact it because something
+else broke. That is why `support_escalation` is a review-level attribute *as well as*
+`customer_support` being an area — which is what makes contact-deflection analysis
+possible later.
 
 ### Model choice is configuration, not code
 
@@ -261,7 +293,7 @@ quickcommerce-voc-copilot/
 | Phase | Scope |
 |---|---|
 | ✅ 1 | Scaffold, ingestion, cleaning, profiling, tests |
-| 2 | Product-area taxonomy discovery from the corpus |
+| ✅ 2 | Product-area taxonomy discovered and validated against the corpus |
 | 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
 | 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | 5 | Trend analysis + competitive metrics |

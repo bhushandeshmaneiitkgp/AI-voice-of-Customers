@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from voc.schemas import (
     COMPARABLE_WINDOW_START,
-    PLATFORMS,
+    allowed_platforms,
     CleanReview,
     RatingBucket,
     RawReviewRow,
@@ -73,7 +73,7 @@ def test_raw_row_rejects_unknown_platform() -> None:
             rating=3, date="30 December 2024", review="text", platform="swiggy_instamart"
         )
     # The message must tell a future maintainer what to do, not just that it failed.
-    assert "PLATFORMS" in str(excinfo.value)
+    assert "config/dataset.yaml" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("field", ["date", "review", "platform"])
@@ -159,8 +159,12 @@ def test_clean_review_rejects_group_size_below_one() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_platform_constant_matches_dataset() -> None:
-    assert set(PLATFORMS) == {"blinkit", "jiomart", "zepto"}
+def test_allowed_platforms_come_from_dataset_config() -> None:
+    """The current corpus must keep its exact platform set after the refactor."""
+    from config.settings import get_dataset_config
+
+    assert set(allowed_platforms()) == {"blinkit", "jiomart", "zepto"}
+    assert set(allowed_platforms()) == set(get_dataset_config().platform_ids)
 
 
 def test_comparable_window_start_is_documented_value() -> None:

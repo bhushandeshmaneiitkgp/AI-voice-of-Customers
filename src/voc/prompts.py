@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from config.settings import DatasetConfig, get_dataset_config
 from voc.taxonomy import Taxonomy
 
 
@@ -61,14 +62,28 @@ def _format_attributes(taxonomy: Taxonomy) -> str:
     return "\n".join(blocks)
 
 
-def build_system_prompt(taxonomy: Taxonomy) -> str:
-    """Assemble the full classification prompt from the taxonomy.
+def build_system_prompt(taxonomy: Taxonomy, dataset: DatasetConfig | None = None) -> str:
+    """Assemble the full classification prompt from the taxonomy and dataset.
+
+    The domain sentence comes from ``config/dataset.yaml``, not from a literal
+    here. Naming one industry in this module would mean the model is told it is
+    reading that industry's reviews no matter which corpus it was actually
+    handed -- biasing every label, invisibly.
+
+    Note the taxonomy is separately domain-specific and separately swappable:
+    a different business supplies both its own ``dataset.yaml`` and its own
+    ``taxonomy.yaml``. This function only guarantees the *dataset* half.
 
     Kept byte-stable across requests so prompt caching can hit: nothing
     review-specific, no timestamps, no counters.
     """
-    return f"""You are a product analyst classifying customer reviews of Indian
-quick-commerce grocery apps (Blinkit, Zepto, JioMart) for a Product Manager.
+    dataset = dataset or get_dataset_config()
+    brands = ", ".join(dataset.platform_display_names)
+    context = dataset.domain.reviewer_context.strip()
+    reviewer_note = f"\n\n{context}" if context else ""
+
+    return f"""You are a product analyst classifying customer reviews of
+{dataset.domain.description} ({brands}) for a Product Manager.{reviewer_note}
 
 Your output feeds a product intelligence tool. A PM will make roadmap decisions
 from it, so a confident wrong label is far more damaging than an omitted one.

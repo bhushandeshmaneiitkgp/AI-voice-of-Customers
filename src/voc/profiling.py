@@ -23,7 +23,7 @@ from voc.clean import (
     normalize_whitespace,
     parse_review_date,
 )
-from voc.schemas import COMPARABLE_WINDOW_START, PLATFORMS
+from voc.schemas import COMPARABLE_WINDOW_START, allowed_platforms
 
 
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
@@ -123,7 +123,8 @@ def build_profile_report(
     # -------------------------------------------------------------- platform
     parts.append("\n## 3. Platform distribution\n")
     rows = []
-    for platform in PLATFORMS:
+    platforms = allowed_platforms()
+    for platform in platforms:
         subset = raw[raw["platform"].str.strip().str.lower() == platform]
         if subset.empty:
             continue
@@ -167,10 +168,10 @@ def build_profile_report(
         per_platform = Counter(platforms_lower[mask])
         rows.append(
             [month]
-            + [f"{per_platform.get(p, 0):,}" for p in PLATFORMS]
+            + [f"{per_platform.get(p, 0):,}" for p in platforms]
             + [f"{int(mask.sum()):,}"]
         )
-    parts.append(_md_table(["Month", *PLATFORMS, "Total"], rows))
+    parts.append(_md_table(["Month", *platforms, "Total"], rows))
 
     in_window = int((dates >= COMPARABLE_WINDOW_START).sum())
     parts.append(

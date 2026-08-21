@@ -20,16 +20,30 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from config.settings import get_dataset_config
+
 # ---------------------------------------------------------------------------
 # Domain constants
 # ---------------------------------------------------------------------------
 
-#: The only platforms present in the dataset. Verified in profiling: the raw
-#: file contains exactly these three strings, already lowercase, no variants.
-PLATFORMS: tuple[str, ...] = ("blinkit", "jiomart", "zepto")
+def allowed_platforms() -> tuple[str, ...]:
+    """Platform values this dataset accepts, from ``config/dataset.yaml``.
 
-#: The single date format used by every row of the raw file, e.g. "30 December 2024".
-RAW_DATE_FORMAT: str = "%d %B %Y"
+    Read at call time rather than frozen at import, so processing a different
+    corpus is a config change. Validation stays strict either way: anything
+    outside this set is rejected at ingestion.
+    """
+    return get_dataset_config().platform_ids
+
+
+def accepted_date_formats() -> tuple[str, ...]:
+    """strptime patterns to try, in order, from ``config/dataset.yaml``.
+
+    A list rather than a single format so a second corpus can declare its own,
+    but still a closed set -- a date matching none of them is an error, not a
+    silently dropped row.
+    """
+    return tuple(get_dataset_config().date_formats)
 
 #: Start of the window in which all three platforms are meaningfully present.
 #: Before 2024-10, Blinkit has 12 reviews and Zepto has 1 -- any cross-platform
@@ -85,11 +99,13 @@ class RawReviewRow(BaseModel):
     @classmethod
     def _known_platform(cls, value: str) -> str:
         normalised = value.strip().lower()
-        if normalised not in PLATFORMS:
+        allowed = allowed_platforms()
+        if normalised not in allowed:
             raise ValueError(
-                f"Unknown platform {value!r}. Expected one of {PLATFORMS}. "
-                "If the source data legitimately gained a platform, add it to "
-                "PLATFORMS in schemas.py rather than loosening this check."
+                f"Unknown platform {value!r}. Expected one of {allowed}. "
+                "If this corpus legitimately has another platform, declare it "
+                "under `platforms:` in config/dataset.yaml -- do not loosen "
+                "this check."
             )
         return normalised
 
@@ -177,8 +193,9 @@ class CleanReview(BaseModel):
     @field_validator("platform")
     @classmethod
     def _known_platform(cls, value: str) -> str:
-        if value not in PLATFORMS:
-            raise ValueError(f"Unknown platform {value!r}; expected one of {PLATFORMS}")
+        allowed = allowed_platforms()
+        if value not in allowed:
+            raise ValueError(f"Unknown platform {value!r}; expected one of {allowed}")
         return value
 
 

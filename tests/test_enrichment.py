@@ -27,6 +27,7 @@ from voc.enrich import (
     chunk_reviews,
     enrich_sync,
     parse_and_validate,
+    stratified_sample,
     to_dataframes,
 )
 from voc.providers.base import CompletionResult
@@ -628,3 +629,74 @@ def test_no_model_ids_hardcoded_in_enrichment_modules() -> None:
         if "claude-" in text:
             offenders.append(name)
     assert not offenders, f"hardcoded model ids in {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Stratified sampling
+# ---------------------------------------------------------------------------
+
+
+def _corpus(n: int = 300) -> pd.DataFrame:
+    """Skewed like the real corpus: mostly negative, three platforms."""
+    platforms = ["blinkit", "zepto", "jiomart"]
+    buckets = ["negative"] * 8 + ["positive", "neutral"]
+    return pd.DataFrame(
+        {
+            "review_id": [f"id{i:05d}" for i in range(n)],
+            "platform": [platforms[i % 3] for i in range(n)],
+            "rating_bucket": [buckets[i % 10] for i in range(n)],
+            "review_text": [f"review body number {i}" for i in range(n)],
+            "rating": [1 if buckets[i % 10] == "negative" else 5 for i in range(n)],
+        }
+    )
+
+
+def test_stratified_sample_preserves_every_column() -> None:
+    """Regression guard for a real bug.
+
+    In pandas 3.0 ``groupby().apply()`` operates on each group *excluding* the
+    grouping columns, so the obvious implementation silently returned a frame
+    with no ``platform``. It surfaced much later while building a request,
+    looking like an API failure rather than a sampling one.
+    """
+    frame = _corpus()
+    sample = stratified_sample(frame, 50)
+
+    assert set(sample.columns) == set(frame.columns)
+    for column in ("platform", "rating_bucket", "review_text", "review_id"):
+        assert column in sample.columns
+
+
+def test_stratified_sample_returns_exactly_n() -> None:
+    assert len(stratified_sample(_corpus(), 50)) == 50
+
+
+def test_stratified_sample_covers_every_platform() -> None:
+    """The point of stratifying: a small sample still exercises each platform."""
+    sample = stratified_sample(_corpus(), 30)
+    assert sample["platform"].nunique() == 3
+
+
+def test_stratified_sample_includes_positives_from_a_negative_corpus() -> None:
+    """A uniform sample of an 80%-negative corpus barely tests strengths."""
+    sample = stratified_sample(_corpus(), 60)
+    assert (sample["rating_bucket"] == "positive").sum() > 0
+
+
+def test_stratified_sample_is_deterministic() -> None:
+    frame = _corpus()
+    first = stratified_sample(frame, 40, seed=7)
+    second = stratified_sample(frame, 40, seed=7)
+    pd.testing.assert_frame_equal(first, second)
+
+
+def test_stratified_sample_returns_all_rows_when_n_exceeds_corpus() -> None:
+    frame = _corpus(20)
+    assert len(stratified_sample(frame, 100)) == 20
+
+
+def test_stratified_sample_rows_come_from_the_source() -> None:
+    frame = _corpus()
+    sample = stratified_sample(frame, 25)
+    assert set(sample["review_id"]) <= set(frame["review_id"])
+    assert sample["review_id"].is_unique

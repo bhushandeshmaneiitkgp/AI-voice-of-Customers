@@ -1,0 +1,11 @@
+# Normalise line endings in the repo; check out native on each platform.
+* text=auto eol=lf
+
+# Binary / generated — never diff or normalise
+*.parquet binary
+*.png      binary
+*.jpg      binary
+
+# Keep the raw dataset byte-exact. It is the immutable input and its
+# SHA-256 is asserted by tests; line-ending normalisation would break that.
+data/raw/reviews.csv -text

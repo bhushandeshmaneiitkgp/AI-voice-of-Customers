@@ -24,11 +24,13 @@ PyYAML>=6.0.1
 # plotting library would be a dependency with no job.
 matplotlib>=3.9.0
 
+# --- AI enrichment (Phase 3) ---
+anthropic>=1.0.0
+
 # --- Tests ---
 pytest>=8.2.0
 
 # =============================================================================
-# Added in Phase 3 (AI enrichment):      anthropic
 # Added in Phase 4 (embeddings / RAG):   sentence-transformers, faiss-cpu
 # Added in Phase 6 (orchestration):      langgraph, langchain-core
 # Added in Phase 8 (UI):                 streamlit

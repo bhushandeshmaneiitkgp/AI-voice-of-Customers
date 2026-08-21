@@ -42,6 +42,9 @@ class Paths:
 
     config_dir = PROJECT_ROOT / "config"
     model_registry = PROJECT_ROOT / "config" / "models.yaml"
+    taxonomy = PROJECT_ROOT / "config" / "taxonomy.yaml"
+
+    docs_dir = PROJECT_ROOT / "docs"
 
     data = PROJECT_ROOT / "data"
 
@@ -59,6 +62,9 @@ class Paths:
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"
+    taxonomy_discovery_report = PROJECT_ROOT / "reports" / "taxonomy_discovery.md"
+    taxonomy_discovery_areas = PROJECT_ROOT / "data" / "processed" / "taxonomy_discovery_areas.csv"
+    taxonomy_discovery_matrix = PROJECT_ROOT / "data" / "processed" / "taxonomy_discovery_cooccurrence.csv"
 
     @classmethod
     def ensure_output_dirs(cls) -> None:

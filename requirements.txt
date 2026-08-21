@@ -25,6 +25,11 @@ PyYAML>=6.0.1
 matplotlib>=3.9.0
 
 # --- AI enrichment (Phase 3) ---
+# openai: NOT for OpenAI models. Its client speaks the chat-completions wire
+# format that OpenRouter, Groq, Together, Fireworks, DeepSeek, Ollama and vLLM
+# all implement, so one dependency reaches every open-source provider.
+openai>=1.50.0
+# anthropic: retained as the frontier control arm for the model benchmark.
 anthropic>=1.0.0
 
 # --- Tests ---

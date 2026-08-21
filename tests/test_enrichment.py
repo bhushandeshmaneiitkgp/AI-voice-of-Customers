@@ -29,6 +29,7 @@ from voc.enrich import (
     parse_and_validate,
     to_dataframes,
 )
+from voc.providers.base import CompletionResult
 from voc.enrichment_schemas import (
     AreaLabel,
     ReviewEnrichment,
@@ -36,7 +37,8 @@ from voc.enrichment_schemas import (
     validate_against_taxonomy,
     verify_grounding,
 )
-from voc.llm import build_request_params, estimate_cost, extract_json_text
+from voc.llm import estimate_cost
+from voc.providers import AnthropicProvider, ProviderError, get_provider, resolve_effort
 from voc.prompts import build_system_prompt, build_user_message
 from voc.taxonomy import get_taxonomy
 
@@ -92,21 +94,27 @@ def _enrichment(review_id: str, **overrides) -> dict:
     return payload
 
 
-def _mock_client(payloads: list[dict]) -> MagicMock:
-    """A client returning one canned response per call."""
-    client = MagicMock()
-    responses = [
-        SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=json.dumps({"results": payload}))],
-            usage=SimpleNamespace(
-                input_tokens=100, output_tokens=200,
-                cache_creation_input_tokens=0, cache_read_input_tokens=50,
-            ),
+def _mock_provider(payloads: list[dict]) -> MagicMock:
+    """A provider returning one canned completion per call."""
+    provider = MagicMock()
+    provider.name = "mock"
+    provider.supports_batch = False
+    provider.complete.side_effect = [
+        CompletionResult(
+            text=json.dumps({"results": payload}),
+            usage={"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 50},
         )
         for payload in payloads
     ]
-    client.messages.create.side_effect = responses
-    return client
+    return provider
+
+
+def _failing_provider(exc: Exception) -> MagicMock:
+    provider = MagicMock()
+    provider.name = "mock"
+    provider.supports_batch = False
+    provider.complete.side_effect = exc
+    return provider
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +385,9 @@ def test_chunk_size_must_be_positive(reviews) -> None:
 
 def test_enrich_sync_end_to_end(reviews, taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    client = _mock_client([[_enrichment(rid) for rid in reviews["review_id"]]])
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
 
-    result = enrich_sync(reviews, taxonomy, profile, client, reviews_per_request=5)
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=5)
 
     assert len(result.enrichments) == 2
     assert result.requests_made == 1
@@ -389,26 +397,25 @@ def test_enrich_sync_end_to_end(reviews, taxonomy) -> None:
 def test_enrich_sync_retries_omitted_reviews_individually(reviews, taxonomy) -> None:
     """The retry path is what keeps grouping from costing coverage."""
     profile = load_model_registry()["opus"]
-    client = _mock_client(
+    provider = _mock_provider(
         [
             [_enrichment(reviews.loc[0, "review_id"])],   # group call omits one
             [_enrichment(reviews.loc[1, "review_id"])],   # individual retry
         ]
     )
 
-    result = enrich_sync(reviews, taxonomy, profile, client, reviews_per_request=2)
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2)
 
     assert len(result.enrichments) == 2
     assert result.failed_review_ids == []
-    assert client.messages.create.call_count == 2
+    assert provider.complete.call_count == 2
 
 
 def test_enrich_sync_records_api_errors_without_crashing(reviews, taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    client = MagicMock()
-    client.messages.create.side_effect = RuntimeError("503 overloaded")
+    provider = _failing_provider(ProviderError("503 overloaded"))
 
-    result = enrich_sync(reviews, taxonomy, profile, client, reviews_per_request=2, retry_missing=False)
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2, retry_missing=False)
 
     assert result.enrichments == []
     assert set(result.failed_review_ids) == set(reviews["review_id"])
@@ -443,11 +450,12 @@ def test_cache_prevents_repeat_api_calls(reviews, taxonomy, tmp_path) -> None:
     for review_id in reviews["review_id"]:
         cache.put(cache_key(review_id, profile), ReviewEnrichment(**_enrichment(review_id)))
 
-    client = MagicMock()
-    result = enrich_sync(reviews, taxonomy, profile, client, cache=cache)
+    provider = MagicMock()
+    provider.supports_batch = False
+    result = enrich_sync(reviews, taxonomy, profile, provider, cache=cache)
 
     assert result.cache_hits == 2
-    client.messages.create.assert_not_called()
+    provider.complete.assert_not_called()
 
 
 def test_corrupt_cache_does_not_crash(tmp_path) -> None:
@@ -461,9 +469,16 @@ def test_corrupt_cache_does_not_crash(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _anthropic_provider() -> AnthropicProvider:
+    """Provider with an injected mock client, so no key or network is needed."""
+    return AnthropicProvider(settings=MagicMock(), client=MagicMock())
+
+
 def test_adaptive_model_gets_thinking_and_effort(taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    params = build_request_params(profile, "sys", "user", build_response_schema(taxonomy))
+    params = _anthropic_provider().build_params(
+        profile, "sys", "user", build_response_schema(taxonomy)
+    )
 
     assert params["thinking"] == {"type": "adaptive"}
     assert params["output_config"]["effort"] == profile.default_effort
@@ -473,7 +488,9 @@ def test_adaptive_model_gets_thinking_and_effort(taxonomy) -> None:
 def test_budget_style_model_gets_no_effort_parameter(taxonomy) -> None:
     """Haiku 4.5 returns a 400 if given `effort`; the registry prevents that."""
     profile = load_model_registry()["haiku"]
-    params = build_request_params(profile, "sys", "user", build_response_schema(taxonomy))
+    params = _anthropic_provider().build_params(
+        profile, "sys", "user", build_response_schema(taxonomy)
+    )
 
     assert "thinking" not in params
     assert "effort" not in params["output_config"]
@@ -481,31 +498,36 @@ def test_budget_style_model_gets_no_effort_parameter(taxonomy) -> None:
 
 def test_system_prompt_is_marked_cacheable(taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    params = build_request_params(profile, "sys", "user", build_response_schema(taxonomy))
+    params = _anthropic_provider().build_params(
+        profile, "sys", "user", build_response_schema(taxonomy)
+    )
 
     assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_request_uses_the_model_id_from_the_registry(taxonomy) -> None:
+    """Decision 1, checked at the point where the wire request is built."""
+    schema = build_response_schema(taxonomy)
     for key, profile in load_model_registry().items():
-        params = build_request_params(profile, "sys", "user", build_response_schema(taxonomy))
+        provider = get_provider(profile, MagicMock(), client=MagicMock())
+        params = provider.build_params(profile, "sys", "user", schema)
         assert params["model"] == profile.model_id, key
 
 
-def test_extract_json_text_skips_thinking_blocks() -> None:
+def test_extract_text_skips_thinking_blocks() -> None:
     message = SimpleNamespace(
         content=[
             SimpleNamespace(type="thinking", thinking="reasoning here"),
             SimpleNamespace(type="text", text='{"results": []}'),
         ]
     )
-    assert extract_json_text(message) == '{"results": []}'
+    assert AnthropicProvider.extract_text(message) == '{"results": []}'
 
 
-def test_extract_json_text_raises_when_no_text_block() -> None:
+def test_extract_text_raises_when_no_text_block() -> None:
     message = SimpleNamespace(content=[SimpleNamespace(type="thinking", thinking="...")])
-    with pytest.raises(ValueError, match="No text block"):
-        extract_json_text(message)
+    with pytest.raises(ProviderError, match="No text block"):
+        AnthropicProvider.extract_text(message)
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +568,8 @@ def test_cheaper_model_estimates_cheaper(taxonomy) -> None:
 
 def test_to_dataframes_produces_long_format_labels(reviews, taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    client = _mock_client([[_enrichment(rid) for rid in reviews["review_id"]]])
-    result = enrich_sync(reviews, taxonomy, profile, client)
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+    result = enrich_sync(reviews, taxonomy, profile, provider)
 
     review_frame, label_frame = to_dataframes(result, reviews)
 
@@ -560,8 +582,8 @@ def test_to_dataframes_produces_long_format_labels(reviews, taxonomy) -> None:
 def test_to_dataframes_carries_deterministic_columns(reviews, taxonomy) -> None:
     """Facts we already know must never be re-derived from the model."""
     profile = load_model_registry()["opus"]
-    client = _mock_client([[_enrichment(rid) for rid in reviews["review_id"]]])
-    result = enrich_sync(reviews, taxonomy, profile, client)
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+    result = enrich_sync(reviews, taxonomy, profile, provider)
 
     review_frame, _ = to_dataframes(result, reviews)
     for column in ("platform", "rating", "review_date", "is_truncated", "in_comparable_window"):
@@ -570,8 +592,8 @@ def test_to_dataframes_carries_deterministic_columns(reviews, taxonomy) -> None:
 
 def test_run_report_captures_coverage_and_grounding(reviews, taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    client = _mock_client([[_enrichment(rid) for rid in reviews["review_id"]]])
-    result = enrich_sync(reviews, taxonomy, profile, client)
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+    result = enrich_sync(reviews, taxonomy, profile, provider)
 
     report = build_run_report(result, reviews, profile, use_batch=False)
 
@@ -583,9 +605,8 @@ def test_run_report_captures_coverage_and_grounding(reviews, taxonomy) -> None:
 
 def test_run_report_records_failures(reviews, taxonomy) -> None:
     profile = load_model_registry()["opus"]
-    client = MagicMock()
-    client.messages.create.side_effect = RuntimeError("boom")
-    result = enrich_sync(reviews, taxonomy, profile, client, retry_missing=False)
+    provider = _failing_provider(ProviderError("boom"))
+    result = enrich_sync(reviews, taxonomy, profile, provider, retry_missing=False)
 
     report = build_run_report(result, reviews, profile, use_batch=False)
 

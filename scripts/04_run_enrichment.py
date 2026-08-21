@@ -1,17 +1,23 @@
 """
 Run AI enrichment over the cleaned corpus.
 
-Requires ANTHROPIC_API_KEY (see .env.example). The model is chosen by
-environment variable, never hardcoded:
+Requires an API key for the selected model's provider (see .env.example).
+The model — and therefore the provider — is chosen by environment variable,
+never hardcoded:
 
-    # smoke test — 20 reviews, immediate, costs cents
+    # see every model, provider and price for this workload; costs nothing
+    python scripts/04_run_enrichment.py --all --dry-run
+
+    # smoke test — 20 reviews on the default open model, costs ~1 cent
     python scripts/04_run_enrichment.py --sample 20
 
-    # full corpus via the Batch API (50% cheaper)
-    python scripts/04_run_enrichment.py --all --batch
+    # benchmark two models on the SAME reviews (the Phase 9 deliverable)
+    VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100
+    VOC_ENRICHMENT_MODEL=qwen72b  python scripts/04_run_enrichment.py --sample 100
 
-    # benchmark a different model against the same reviews
-    VOC_ENRICHMENT_MODEL=haiku python scripts/04_run_enrichment.py --sample 100
+    # full corpus; --batch is honoured only where the provider supports it,
+    # otherwise it falls back to concurrent live requests
+    python scripts/04_run_enrichment.py --all --batch
 
 Reads  : data/interim/reviews_clean.parquet   (read-only)
          config/taxonomy.yaml
@@ -45,10 +51,11 @@ from voc.enrich import (
 )
 from voc.llm import (
     DEFAULT_REVIEWS_PER_REQUEST,
-    create_client,
+    create_provider,
     estimate_cost,
     resolve_effort,
 )
+from voc.providers import ProviderError
 from voc.prompts import build_system_prompt
 from voc.taxonomy import get_taxonomy
 
@@ -69,6 +76,10 @@ def main() -> int:
         "--effort", default=settings.enrichment_effort,
         choices=["low", "medium", "high", "xhigh", "max"],
         help="Override the model's default effort. Lower is cheaper; thinking tokens bill as output.",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=8,
+        help="Parallel requests for providers without a batch endpoint.",
     )
     parser.add_argument("--yes", action="store_true", help="Skip the cost confirmation prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Estimate cost and exit without calling the API.")
@@ -112,13 +123,17 @@ def main() -> int:
     print("=" * 78)
     print("  AI ENRICHMENT")
     print("=" * 78)
+    print(f"  Provider         : {profile.provider}"
+          + (f"  ({profile.base_url})" if profile.base_url else ""))
     print(f"  Model            : {profile.display_name}  ({profile.model_id})")
+    print(f"  Structured output: {profile.structured_output}")
     print(f"  Selected via     : VOC_ENRICHMENT_MODEL={profile.key}")
     print(f"  Thinking         : {profile.thinking_style}"
           + (f", effort={effort}" if effort else " (effort unsupported by this model)"))
     print(f"  Reviews          : {len(frame):,}")
     print(f"  Prompt           : ~{len(system_prompt) // 4:,} tokens (cached across requests)")
-    print(f"  Transport        : {'Batch API' if args.batch else 'synchronous'}")
+    batch_note = "Batch API" if (args.batch and profile.provider == "anthropic") else f"live, {args.concurrency} concurrent"
+    print(f"  Transport        : {batch_note}")
     print("-" * 78)
     print(f"  ESTIMATE         : {estimate.summary(args.batch)}")
     print(f"  (standard ${estimate.usd_standard:,.2f} / batch ${estimate.usd_batch:,.2f}. "
@@ -126,26 +141,29 @@ def main() -> int:
 
     if args.dry_run:
         print("-" * 78)
-        print("  OPTIONS for this workload (Batch API pricing):")
-        print(f"  {'model':<10}{'effort':<9}{'est. $':>10}   notes")
-        registry = load_model_registry()
-        for key in ("opus", "sonnet", "haiku"):
-            candidate = registry[key]
-            for level in ("low", "medium", "high"):
+        print("  OPTIONS for this workload (best available pricing per provider):")
+        print(f"  {'key':<12}{'provider':<12}{'effort':<8}{'est. $':>9}   {'struct':<12}notes")
+        for key, candidate in load_model_registry().items():
+            levels = ("low", "medium", "high") if candidate.supports_effort else (None,)
+            for level in levels:
                 candidate_effort = resolve_effort(candidate, level)
                 option = estimate_cost(
                     candidate, len(frame), system_prompt,
                     args.reviews_per_request, effort=candidate_effort,
                 )
-                note = "" if candidate.supports_effort else "effort unsupported; runs without thinking"
-                shown = candidate_effort or "n/a"
-                print(f"  {key:<10}{shown:<9}{option.usd_batch:>10,.2f}   {note}")
-                if not candidate.supports_effort:
-                    break
+                # Only Anthropic has a discounted batch endpoint; everyone else
+                # pays list price, so compare each at its own best rate.
+                price = option.usd_batch if option.batch_available else option.usd_standard
+                print(
+                    f"  {key:<12}{candidate.provider:<12}{candidate_effort or 'n/a':<8}"
+                    f"{price:>9,.2f}   {candidate.structured_output:<12}"
+                    f"{'no batch discount' if not option.batch_available else ''}"
+                )
         print()
-        print("  Benchmark before committing: run --sample 100 on two models, compare")
-        print("  grounding rate and validation issues, then choose. That comparison is")
-        print("  itself a Phase 9 deliverable.")
+        print("  Open models are ~10x cheaper but paraphrase more, which shows up as a")
+        print("  lower grounding rate. Benchmark before committing: run --sample 100 on")
+        print("  two models and compare grounding and validation issues. That comparison")
+        print("  is itself a Phase 9 deliverable.")
     print("=" * 78)
     print()
 
@@ -163,16 +181,23 @@ def main() -> int:
             return 1
 
     try:
-        client = create_client(settings)
-    except RuntimeError as exc:
+        provider = create_provider(profile, settings)
+    except (RuntimeError, ProviderError) as exc:
         log.error("%s", exc)
         return 1
 
     cache = EnrichmentCache(Paths.enrichment_cache(profile.key))
 
-    if args.batch:
+    use_batch = args.batch and provider.supports_batch
+    if args.batch and not provider.supports_batch:
+        log.warning(
+            "Provider %r has no batch endpoint; running %d concurrent live requests instead.",
+            provider.name, args.concurrency,
+        )
+
+    if use_batch:
         batch_id, group_map = submit_batch(
-            frame, taxonomy, profile, client, args.reviews_per_request, effort=effort
+            frame, taxonomy, profile, provider, args.reviews_per_request, effort=effort
         )
         print(f"  Batch submitted: {batch_id}")
         print("  Polling every 60s. Most batches finish within an hour; safe to Ctrl-C —")
@@ -184,25 +209,26 @@ def main() -> int:
                   f"succeeded={counts.succeeded} errored={counts.errored} "
                   f"processing={counts.processing}")
 
-        poll_batch(client, batch_id, on_poll=report)
+        poll_batch(provider, batch_id, on_poll=report)
         result = collect_batch_results(
-            client, batch_id, frame, group_map, taxonomy, cache=cache, profile=profile
+            provider, batch_id, frame, group_map, taxonomy, cache=cache, profile=profile
         )
     else:
         def progress(done: int, total: int) -> None:
             print(f"    request {done}/{total}", end="\r", flush=True)
 
         result = enrich_sync(
-            frame, taxonomy, profile, client,
+            frame, taxonomy, profile, provider,
             reviews_per_request=args.reviews_per_request,
             cache=cache, progress=progress, effort=effort,
+            max_concurrency=args.concurrency,
         )
         print()
 
     cache.save()
 
     reviews, labels = to_dataframes(result, frame)
-    report = build_run_report(result, frame, profile, args.batch)
+    report = build_run_report(result, frame, profile, use_batch)
 
     if not reviews.empty:
         reviews.to_parquet(Paths.enriched_reviews, index=False)

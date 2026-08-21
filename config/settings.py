@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -110,6 +110,17 @@ class ModelProfile(BaseModel):
     context_window: int
     input_price_per_mtok: float
     output_price_per_mtok: float
+
+    #: Which vendor serves this model. "anthropic" uses the first-party SDK;
+    #: anything else is treated as OpenAI-compatible and needs a base_url.
+    provider: str = "anthropic"
+    base_url: str | None = None
+
+    #: How strongly the provider can constrain output shape. Drives whether the
+    #: JSON schema is enforced by the API or merely described in the prompt.
+    structured_output: Literal["json_schema", "json_object", "none"] = "json_schema"
+
+    #: Only Anthropic offers a discounted async batch endpoint.
     batch_discount: float = 0.5
     thinking_style: Literal["adaptive", "budget"] = "adaptive"
     supports_effort: bool = True
@@ -170,6 +181,11 @@ class Settings(BaseSettings):
         env_prefix="VOC_",
         case_sensitive=False,
         extra="ignore",
+        # Fields with a validation_alias can otherwise ONLY be set by that
+        # alias. Most alias names happen to case-match their field name, but
+        # LLM_API_KEY does not -- so without this, constructing Settings in a
+        # test or script silently ignores that argument.
+        populate_by_name=True,
     )
 
     # --- Secrets -----------------------------------------------------------
@@ -178,9 +194,19 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(
         default=None, validation_alias="ANTHROPIC_API_KEY"
     )
+    openrouter_api_key: str | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    # Catch-all for other OpenAI-compatible endpoints (Groq, Together,
+    # DeepSeek, Fireworks). Local servers such as Ollama need no key.
+    openai_compatible_api_key: str | None = Field(
+        default=None, validation_alias="LLM_API_KEY"
+    )
 
     # --- Model selection ---------------------------------------------------
-    enrichment_model: str = "opus"
+    # Defaults mirror `default_enrichment` / `default_synthesis` in
+    # config/models.yaml; a test asserts the two stay in agreement.
+    enrichment_model: str = "llama70b"
     synthesis_model: str = "opus"
     use_batch_api: bool = True
 
@@ -234,20 +260,41 @@ class Settings(BaseSettings):
             )
         return registry[key]
 
-    def require_api_key(self) -> str:
-        """Return the API key, or fail with an actionable message.
+    #: Where to get a key for each provider, shown when one is missing.
+    _KEY_SOURCES: ClassVar[dict[str, tuple[str, str]]] = {
+        "anthropic": ("ANTHROPIC_API_KEY", "https://console.anthropic.com/settings/keys"),
+        "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/keys"),
+    }
 
-        Called only by phases that actually make API calls, so the Phase 1
-        pipeline stays runnable with no credentials configured at all.
+    def require_api_key(self, provider: str = "anthropic") -> str:
+        """Return the API key for a provider, or fail with an actionable message.
+
+        Called only by phases that make API calls, so the Phase 1 and 2
+        pipelines stay runnable with no credentials configured at all.
+
+        Local providers (Ollama, vLLM) need no real key, so a placeholder is
+        returned rather than blocking a run that would have worked.
         """
-        if not self.anthropic_api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set.\n"
-                "  1. Copy .env.example to .env\n"
-                "  2. Add your key from https://console.anthropic.com/settings/keys\n"
-                "Never paste the key into a tracked source file."
-            )
-        return self.anthropic_api_key
+        candidates = {
+            "anthropic": self.anthropic_api_key,
+            "openrouter": self.openrouter_api_key,
+        }
+        key = candidates.get(provider) or self.openai_compatible_api_key
+        if key:
+            return key
+
+        if provider in ("ollama", "local", "vllm"):
+            return "not-needed"
+
+        variable, url = self._KEY_SOURCES.get(
+            provider, (f"{provider.upper()}_API_KEY or LLM_API_KEY", "the provider's dashboard")
+        )
+        raise RuntimeError(
+            f"No API key found for provider {provider!r}.\n"
+            f"  1. Copy .env.example to .env\n"
+            f"  2. Set {variable} using a key from {url}\n"
+            "Never paste a key into a tracked source file."
+        )
 
 
 @lru_cache(maxsize=1)

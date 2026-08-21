@@ -26,10 +26,39 @@ def test_registry_profiles_are_well_formed() -> None:
     for key, profile in load_model_registry().items():
         assert profile.key == key
         assert profile.model_id, f"{key} has no model_id"
-        assert profile.input_price_per_mtok > 0
-        assert profile.output_price_per_mtok > 0
+        # Locally hosted models are genuinely free, so zero is valid there and
+        # only there -- a hosted model priced at zero is a transcription error.
+        floor = 0.0 if profile.tier == "local" else 0.0001
+        assert profile.input_price_per_mtok >= floor, key
+        assert profile.output_price_per_mtok >= floor, key
         assert 0 < profile.batch_discount <= 1
         assert profile.context_window > 0
+
+
+def test_settings_defaults_match_the_registry_defaults() -> None:
+    """The YAML declares defaults and Settings mirrors them; drift is silent.
+
+    Without this, ``default_enrichment`` in models.yaml could say one thing
+    while an unconfigured run quietly used another model.
+    """
+    import yaml
+
+    from config.settings import Settings
+
+    raw = yaml.safe_load(Paths.model_registry.read_text(encoding="utf-8"))
+    settings = Settings(_env_file=None)
+
+    assert settings.enrichment_model == raw["default_enrichment"]
+    assert settings.synthesis_model == raw["default_synthesis"]
+
+
+def test_declared_defaults_exist_in_the_registry() -> None:
+    import yaml
+
+    raw = yaml.safe_load(Paths.model_registry.read_text(encoding="utf-8"))
+    registry = load_model_registry()
+    assert raw["default_enrichment"] in registry
+    assert raw["default_synthesis"] in registry
 
 
 def test_no_model_id_is_hardcoded_in_pipeline_code() -> None:

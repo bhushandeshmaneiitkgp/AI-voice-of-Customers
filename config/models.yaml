@@ -2,25 +2,133 @@
 # Model registry  (Decision 1: configurable enrichment model, never hardcoded)
 #
 # Selection happens via environment variables, not code:
-#     VOC_ENRICHMENT_MODEL=haiku   # the 4,620-review classification pass
-#     VOC_SYNTHESIS_MODEL=opus     # low-volume reasoning nodes
+#     VOC_ENRICHMENT_MODEL=llama70b   # the 4,620-review classification pass
+#     VOC_SYNTHESIS_MODEL=opus        # low-volume reasoning nodes
 #
 # This lets us run the SAME pipeline under different models and score each one
 # against the gold evaluation set in Phase 9. The cost/quality comparison then
 # becomes a documented result in EVALUATION.md rather than an untested guess.
 #
-# Prices are Anthropic first-party API rates in USD per million tokens.
-# `batch_discount: 0.5` reflects the Batch API's 50% discount.
-# Verify current pricing at https://www.anthropic.com/pricing before quoting.
-# Pricing snapshot taken: 2026-08-21
+# -----------------------------------------------------------------------------
+# PROVIDERS
+#
+#   provider: anthropic   -> first-party SDK, native Batch API (50% discount)
+#   provider: <anything>  -> OpenAI-compatible; requires base_url
+#
+# OpenRouter, Groq, Together, Fireworks, DeepSeek, Ollama and vLLM all speak the
+# OpenAI chat-completions format, so ONE adapter reaches all of them. Switching
+# provider is a base_url change here, not a code change.
+#
+# structured_output declares how strongly the provider can constrain the reply:
+#   json_schema  -> schema enforced by the API            (strongest)
+#   json_object  -> valid JSON guaranteed, schema is not  (schema goes in prompt)
+#   none         -> nothing guaranteed                    (schema goes in prompt)
+# Output is validated identically regardless; this only changes how much junk
+# has to be rejected.
+#
+# -----------------------------------------------------------------------------
+# PRICING
+#
+# USD per million tokens. Anthropic figures are first-party rates verified
+# 2026-08-21. OPENROUTER FIGURES ARE APPROXIMATE and change frequently --
+# check https://openrouter.ai/models before quoting a cost anywhere that
+# matters. The pipeline's cost estimate is only as good as these numbers.
+#
+# `batch_discount: 1.0` means no batch discount is available (the default
+# everywhere except Anthropic).
 # =============================================================================
 
-default_enrichment: opus
+default_enrichment: llama70b
 default_synthesis: opus
 
 profiles:
 
+  # ===========================================================================
+  # OpenRouter -- open-weight models, one key
+  # ===========================================================================
+
+  llama70b:
+    provider: openrouter
+    base_url: https://openrouter.ai/api/v1
+    model_id: meta-llama/llama-3.3-70b-instruct
+    display_name: Llama 3.3 70B Instruct
+    tier: open
+    context_window: 131072
+    input_price_per_mtok: 0.12
+    output_price_per_mtok: 0.30
+    batch_discount: 1.0
+    structured_output: json_schema
+    thinking_style: budget      # no adaptive thinking; effort is not a parameter
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Solid open-weight all-rounder and the default enrichment model. Strong
+      instruction following for its price. Watch the grounding rate: open
+      models paraphrase more than frontier ones, and verbatim evidence spans
+      are what the whole evidence chain rests on.
+
+  qwen72b:
+    provider: openrouter
+    base_url: https://openrouter.ai/api/v1
+    model_id: qwen/qwen-2.5-72b-instruct
+    display_name: Qwen 2.5 72B Instruct
+    tier: open
+    context_window: 131072
+    input_price_per_mtok: 0.13
+    output_price_per_mtok: 0.40
+    batch_discount: 1.0
+    structured_output: json_schema
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Comparable to Llama 3.3 70B and often better at strict JSON adherence.
+      The natural second arm of the open-model benchmark.
+
+  deepseek:
+    provider: openrouter
+    base_url: https://openrouter.ai/api/v1
+    model_id: deepseek/deepseek-chat
+    display_name: DeepSeek V3
+    tier: open
+    context_window: 65536
+    input_price_per_mtok: 0.28
+    output_price_per_mtok: 1.10
+    batch_discount: 1.0
+    structured_output: json_object
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Strong reasoning for the price. Declared json_object rather than
+      json_schema because schema enforcement is less reliable here -- the
+      pipeline compensates by putting the schema in the prompt and validating
+      everything that comes back.
+
+  gptoss:
+    provider: openrouter
+    base_url: https://openrouter.ai/api/v1
+    model_id: openai/gpt-oss-120b
+    display_name: gpt-oss 120B
+    tier: open
+    context_window: 131072
+    input_price_per_mtok: 0.10
+    output_price_per_mtok: 0.50
+    batch_discount: 1.0
+    structured_output: json_schema
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Open-weights model with good structured-output behaviour. Useful third
+      arm for the benchmark.
+
+  # ===========================================================================
+  # Anthropic -- retained as the frontier control arm for EVALUATION.md
+  # ===========================================================================
+
   opus:
+    provider: anthropic
     model_id: claude-opus-5
     display_name: Claude Opus 5
     tier: frontier
@@ -28,15 +136,19 @@ profiles:
     input_price_per_mtok: 5.00
     output_price_per_mtok: 25.00
     batch_discount: 0.5
+    structured_output: json_schema
     # Thinking is ON by default on Opus 5; effort controls depth.
     thinking_style: adaptive
     supports_effort: true
     default_effort: high
     notes: >
-      Highest quality. Default for synthesis nodes (root cause, opportunities,
-      product brief) where reasoning quality directly drives output quality.
+      Frontier control arm. Not the default for the 4,620-review pass on cost
+      grounds, but the reference point that makes the open-model grounding and
+      accuracy numbers interpretable. Also the default for synthesis nodes,
+      which are low-volume and reasoning-heavy.
 
   sonnet:
+    provider: anthropic
     model_id: claude-sonnet-5
     display_name: Claude Sonnet 5
     tier: balanced
@@ -44,15 +156,17 @@ profiles:
     input_price_per_mtok: 3.00
     output_price_per_mtok: 15.00
     batch_discount: 0.5
+    structured_output: json_schema
     thinking_style: adaptive
     supports_effort: true
     default_effort: high
     notes: >
-      Balanced cost/quality. Introductory pricing of $2.00/$10.00 per MTok
-      applies through 2026-08-31; the figures above are the standard rates,
-      so cost estimates are conservative rather than optimistic.
+      Middle control arm. Introductory pricing of $2.00/$10.00 per MTok applies
+      through 2026-08-31; the figures above are standard rates, so estimates
+      are conservative rather than optimistic.
 
   haiku:
+    provider: anthropic
     model_id: claude-haiku-4-5
     display_name: Claude Haiku 4.5
     tier: fast
@@ -60,28 +174,35 @@ profiles:
     input_price_per_mtok: 1.00
     output_price_per_mtok: 5.00
     batch_discount: 0.5
-    # Haiku 4.5 predates adaptive thinking: it uses an explicit token budget,
-    # and passing `effort` to it returns a 400. Phase 3 branches on these flags.
+    structured_output: json_schema
+    # Haiku 4.5 predates adaptive thinking: passing `effort` returns a 400.
     thinking_style: budget
     supports_effort: false
     default_effort: null
     notes: >
-      Cheapest option. Strong candidate for the high-volume, schema-constrained
-      per-review classification pass. Must be validated against gold labels
-      before being trusted — that validation is the point of this registry.
+      Cheapest Anthropic option. The closest frontier-vendor comparison point
+      to the open models on price.
 
-  opus_4_8:
-    model_id: claude-opus-4-8
-    display_name: Claude Opus 4.8
-    tier: frontier
-    context_window: 1000000
-    input_price_per_mtok: 5.00
-    output_price_per_mtok: 25.00
-    batch_discount: 0.5
-    # On Opus 4.8, omitting `thinking` runs WITHOUT thinking — must set it.
-    thinking_style: adaptive
-    supports_effort: true
-    default_effort: high
+  # ===========================================================================
+  # Local -- no key, no network, no cost
+  # ===========================================================================
+
+  ollama:
+    provider: ollama
+    base_url: http://localhost:11434/v1
+    model_id: llama3.3
+    display_name: Llama 3.3 (local via Ollama)
+    tier: local
+    context_window: 131072
+    input_price_per_mtok: 0.0
+    output_price_per_mtok: 0.0
+    batch_discount: 1.0
+    structured_output: json_schema
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
     notes: >
-      Previous-generation frontier model. Kept as a control arm so the
-      evaluation can show whether the newer model actually helps this task.
+      Fully offline; no key required and no data leaves the machine. Needs a
+      capable GPU -- on CPU alone expect many hours for the full corpus. Useful
+      for a free smoke test regardless of what runs the production pass.
+      Start the server with `ollama serve` and pull the model first.

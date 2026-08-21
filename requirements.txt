@@ -1,0 +1,30 @@
+# =============================================================================
+# Phase 1 dependencies: ingestion, cleaning, profiling, tests.
+# Later phases append their own block rather than pre-installing unused libs.
+# Pinned with >= to stay current while keeping the build reproducible enough.
+# =============================================================================
+
+# --- Data ---
+pandas>=2.2.0
+numpy>=1.26.0
+pyarrow>=16.0.0            # parquet engine
+
+# --- Near-duplicate detection (TF-IDF + cosine + connected components) ---
+scikit-learn>=1.5.0
+scipy>=1.13.0
+
+# --- Config, validation, secrets ---
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.1
+
+# --- Tests ---
+pytest>=8.2.0
+
+# =============================================================================
+# Added in Phase 3 (AI enrichment):      anthropic
+# Added in Phase 4 (embeddings / RAG):   sentence-transformers, faiss-cpu
+# Added in Phase 6 (orchestration):      langgraph, langchain-core
+# Added in Phase 8 (UI):                 streamlit, plotly
+# =============================================================================

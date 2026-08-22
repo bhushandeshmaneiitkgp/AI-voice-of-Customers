@@ -839,3 +839,70 @@ def test_breaker_resets_after_a_success(reviews, taxonomy) -> None:
     # One failure then one success: below the breaker limit, so the run finished.
     assert len(result.enrichments) == 1
     assert provider.complete.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Cache durability
+# ---------------------------------------------------------------------------
+
+
+def test_cache_autosaves_before_the_run_ends(tmp_path) -> None:
+    """A long run that dies partway must not lose everything.
+
+    Saving only at the end meant a crash at minute 25 of a 30-minute run
+    discarded all of it and re-billed the work.
+    """
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, autosave_every=3)
+
+    for i in range(3):
+        cache.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
+
+    assert path.exists(), "cache should have persisted without an explicit save()"
+    assert len(EnrichmentCache(path)) == 3
+
+
+def test_cache_does_not_write_on_every_put(tmp_path) -> None:
+    """Autosave must batch; writing per entry would dominate a long run."""
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, autosave_every=10)
+
+    for i in range(4):
+        cache.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
+
+    assert not path.exists()
+    assert cache.unsaved == 4
+
+
+def test_cache_write_is_atomic(tmp_path) -> None:
+    """A killed process must not leave a truncated, unparseable cache."""
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, autosave_every=0)
+    cache.put("k1", ReviewEnrichment(**_enrichment("r1")))
+    cache.save()
+
+    # No temp file left behind, and the result parses.
+    assert not list(tmp_path.glob("*.tmp"))
+    assert json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_cache_survives_a_simulated_crash(tmp_path) -> None:
+    """Entries persisted before the crash are recoverable afterwards."""
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, autosave_every=2)
+    for i in range(5):
+        cache.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
+    del cache  # process dies here, no explicit save
+
+    recovered = EnrichmentCache(path)
+    # 4 of 5 were autosaved; the 5th was still in flight.
+    assert len(recovered) == 4
+    assert recovered.get("k0") is not None
+
+
+def test_autosave_can_be_disabled(tmp_path) -> None:
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, autosave_every=0)
+    for i in range(50):
+        cache.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
+    assert not path.exists()

@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -153,18 +154,40 @@ def cache_key(review_id: str, profile: ModelProfile) -> str:
     return hashlib.sha256(payload).hexdigest()[:20]
 
 
-class EnrichmentCache:
-    """Disk cache of validated enrichments, one JSON file per run configuration."""
+#: Persist the cache after this many new entries. A full-corpus run takes tens
+#: of minutes; saving only at the end means a crash at minute 25 loses
+#: everything and re-bills it. Small enough that little is ever at risk, large
+#: enough that writing is not the bottleneck.
+CACHE_AUTOSAVE_EVERY = 25
 
-    def __init__(self, path: Path) -> None:
+
+class EnrichmentCache:
+    """Disk cache of validated enrichments, one JSON file per run configuration.
+
+    Saves incrementally rather than only at the end, and writes atomically. A
+    long run that dies partway should cost the work in flight, not the whole
+    session -- and a process killed mid-write must not leave a half-written
+    file that reads as corrupt on the next attempt.
+    """
+
+    def __init__(self, path: Path, autosave_every: int = CACHE_AUTOSAVE_EVERY) -> None:
         self.path = path
+        self.autosave_every = autosave_every
         self._entries: dict[str, dict[str, Any]] = {}
+        self._unsaved = 0
         if path.exists():
             try:
                 self._entries = json.loads(path.read_text(encoding="utf-8"))
                 logger.info("Loaded %d cached enrichments from %s", len(self._entries), path.name)
             except json.JSONDecodeError:
                 logger.warning("Cache at %s is corrupt; starting empty.", path)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def unsaved(self) -> int:
+        return self._unsaved
 
     def get(self, key: str) -> ReviewEnrichment | None:
         raw = self._entries.get(key)
@@ -179,10 +202,23 @@ class EnrichmentCache:
 
     def put(self, key: str, enrichment: ReviewEnrichment) -> None:
         self._entries[key] = enrichment.model_dump()
+        self._unsaved += 1
+        if self.autosave_every and self._unsaved >= self.autosave_every:
+            self.save()
 
     def save(self) -> None:
+        """Write the cache atomically.
+
+        Serialise to a sibling temp file, then ``os.replace`` it over the
+        target -- an atomic rename on every platform we support. Writing in
+        place would leave a truncated, unparseable file if the process died
+        mid-write, turning a recoverable interruption into total data loss.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+        temp = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+        os.replace(temp, self.path)
+        self._unsaved = 0
         logger.info("Wrote %d cached enrichments to %s", len(self._entries), self.path.name)
 
 

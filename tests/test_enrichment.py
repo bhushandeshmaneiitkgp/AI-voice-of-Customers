@@ -28,6 +28,7 @@ from voc.enrich import (
     cache_key,
     chunk_reviews,
     enrich_sync,
+    normalise_response_shape,
     parse_and_validate,
     stratified_sample,
     to_dataframes,
@@ -906,3 +907,89 @@ def test_autosave_can_be_disabled(tmp_path) -> None:
     for i in range(50):
         cache.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
     assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Response shape tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_bare_array_response_is_accepted() -> None:
+    """A model returning [...] instead of {"results": [...]}.
+
+    Observed from gpt-oss-20b. Same class as markdown fences: a presentation
+    difference, not a content one, so it is normalised rather than rejected.
+    """
+    assert normalise_response_shape([{"review_id": "r1"}]) == {"results": [{"review_id": "r1"}]}
+
+
+def test_alternatively_named_wrapper_is_accepted() -> None:
+    assert normalise_response_shape({"reviews": [{"review_id": "r1"}]}) == {
+        "results": [{"review_id": "r1"}]
+    }
+
+
+def test_single_unwrapped_enrichment_is_accepted() -> None:
+    assert normalise_response_shape({"review_id": "r1", "areas": []}) == {
+        "results": [{"review_id": "r1", "areas": []}]
+    }
+
+
+def test_correct_shape_passes_through_unchanged() -> None:
+    payload = {"results": [{"review_id": "r1"}]}
+    assert normalise_response_shape(payload) is payload
+
+
+def test_unrecognisable_shape_is_left_for_validation_to_reject() -> None:
+    assert normalise_response_shape("just a string") == "just a string"
+
+
+def test_bare_array_survives_the_full_parse(reviews, taxonomy) -> None:
+    """End to end: the shape that previously crashed a whole run now works."""
+    payload = json.dumps([_enrichment(rid) for rid in reviews["review_id"]])
+    result = parse_and_validate(payload, reviews, taxonomy)
+
+    assert len(result.enrichments) == 2
+    assert result.failed_review_ids == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "42",                        # a bare number -> TypeError on **
+        '"a string"',                # a bare string
+        "null",                      # null
+        '{"results": "not a list"}', # right key, wrong type
+        "[1, 2, 3]",                 # array of non-objects
+    ],
+)
+def test_malformed_payloads_are_recorded_not_raised(payload, reviews, taxonomy) -> None:
+    """Any shape must degrade to an issue. This is the bug that killed a run.
+
+    The handler previously caught only JSONDecodeError and ValidationError, so
+    a TypeError from `**` on a list escaped a worker thread and terminated the
+    entire enrichment.
+    """
+    result = parse_and_validate(payload, reviews, taxonomy)
+
+    assert result.enrichments == []
+    assert set(result.failed_review_ids) == set(reviews["review_id"])
+    assert any(issue.kind == "unparseable_response" for issue in result.issues)
+
+
+def test_worker_contains_a_validation_crash(reviews, taxonomy, monkeypatch) -> None:
+    """A defect inside validation must cost one group, not the whole run."""
+    profile = load_model_registry()["opus"]
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+
+    def exploding(*args, **kwargs):
+        raise RuntimeError("unexpected defect in validation")
+
+    monkeypatch.setattr("voc.enrich.parse_and_validate", exploding)
+
+    result = enrich_sync(
+        reviews, taxonomy, profile, provider, reviews_per_request=2, retry_missing=False
+    )
+
+    assert any(issue.kind == "validation_crash" for issue in result.issues)
+    assert set(result.failed_review_ids) == set(reviews["review_id"])

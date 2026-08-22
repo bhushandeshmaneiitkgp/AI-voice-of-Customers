@@ -136,6 +136,29 @@ profiles:
       would repeat the mistake the qwen note above records. Worth a 100-review
       run before the next full pass.
 
+  gptoss_free:
+    provider: openrouter
+    base_url: https://openrouter.ai/api/v1
+    model_id: openai/gpt-oss-20b:free
+    display_name: gpt-oss 20B (free tier)
+    tier: open
+    context_window: 131072
+    input_price_per_mtok: 0.0
+    output_price_per_mtok: 0.0
+    batch_discount: 1.0
+    structured_output: json_schema
+    thinking_style: budget
+    supports_effort: false
+    default_effort: null
+    notes: >
+      Zero cost. The only free-tier OpenRouter model that supports json_schema,
+      checked against the live catalogue on 2026-08-21. Useful when the account
+      has no credit -- a paid run on this corpus costs about $1, so this is a
+      fallback rather than a first choice. NOT benchmarked: at 20B it is a third
+      the size of llama70b, so expect a lower grounding rate, and measure it
+      with --sample 100 before trusting a full pass. Free tiers also carry
+      tighter rate limits, so use a low --concurrency.
+
   # ===========================================================================
   # Anthropic -- retained as the frontier control arm for EVALUATION.md
   # ===========================================================================

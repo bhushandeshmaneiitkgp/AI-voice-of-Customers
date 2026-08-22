@@ -16,7 +16,12 @@ import logging
 from typing import Any
 
 from config.settings import ModelProfile, Settings
-from voc.providers.base import CompletionResult, ProviderError, normalise_usage
+from voc.providers.base import (
+    CompletionResult,
+    ProviderError,
+    classify_error,
+    normalise_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +118,7 @@ class AnthropicProvider:
         try:
             message = self._client.messages.create(**params)
         except Exception as exc:  # noqa: BLE001 - surfaced as ProviderError
-            raise ProviderError(str(exc)) from exc
+            raise classify_error(exc) from exc
 
         return CompletionResult(
             text=self.extract_text(message),

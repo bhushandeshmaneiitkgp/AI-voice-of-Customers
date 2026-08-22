@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_MAX_TOKENS",
+    "max_tokens_for",
     "DEFAULT_REVIEWS_PER_REQUEST",
     "EFFORT_OUTPUT_MULTIPLIER",
     "CostEstimate",
@@ -26,10 +27,32 @@ __all__ = [
     "resolve_effort",
 ]
 
-# Enough for a group of enrichments plus reasoning. Structured output is
-# compact, but truncation mid-JSON loses the whole response, so this is
-# deliberately generous rather than tight.
-DEFAULT_MAX_TOKENS = 8000
+# Measured output per enriched review, from the 100-review benchmark:
+# llama70b 251 tokens/review, qwen72b 881. Sized for the VERBOSE case with
+# headroom -- undersizing truncates mid-JSON and loses the whole response,
+# which is far worse than reserving a few hundred unused tokens.
+#
+# Right-sizing is not tidiness. Providers RESERVE credit against max_tokens,
+# not against actual usage, so an oversized value makes requests unaffordable
+# on a low balance and they fail with 402 before the model ever runs. A flat
+# 8000 did exactly that on a free-tier account: "you requested up to 8000
+# tokens, but can only afford 5580".
+OUTPUT_TOKENS_PER_REVIEW = 900
+
+# Fixed allowance for the JSON envelope around the per-review results.
+OUTPUT_TOKENS_OVERHEAD = 500
+
+# Fallback when the caller does not know the group size.
+DEFAULT_MAX_TOKENS = 4000
+
+
+def max_tokens_for(reviews_per_request: int) -> int:
+    """Size the output budget to the actual work in one request.
+
+    Truncation mid-JSON loses the whole response, so this errs generous -- but
+    generous relative to measured output, not to a round number.
+    """
+    return OUTPUT_TOKENS_OVERHEAD + OUTPUT_TOKENS_PER_REVIEW * max(1, reviews_per_request)
 
 # Reviews sent per API call. Groups amortise the ~4,400-token taxonomy prompt:
 # one review per call would spend ~12M input tokens on the corpus, five per call

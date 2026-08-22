@@ -45,6 +45,7 @@ from voc.enrich import (
     build_run_report,
     collect_batch_results,
     enrich_sync,
+    RunAborted,
     poll_batch,
     stratified_sample,
     submit_batch,
@@ -228,12 +229,22 @@ def main() -> int:
         def progress(done: int, total: int) -> None:
             print(f"    request {done}/{total}", end="\r", flush=True)
 
-        result = enrich_sync(
-            frame, taxonomy, profile, provider,
-            reviews_per_request=args.reviews_per_request,
-            cache=cache, progress=progress, effort=effort,
-            max_concurrency=args.concurrency,
-        )
+        try:
+            result = enrich_sync(
+                frame, taxonomy, profile, provider,
+                reviews_per_request=args.reviews_per_request,
+                cache=cache, progress=progress, effort=effort,
+                max_concurrency=args.concurrency,
+            )
+        except RunAborted as exc:
+            # Whatever succeeded before the breaker tripped is still worth
+            # keeping: a re-run resumes from it instead of re-paying.
+            cache.save()
+            print()
+            log.error("RUN ABORTED: %s", exc)
+            log.error("Partial results kept in %s -- a re-run resumes from them.",
+                      Paths.enrichment_cache(profile.key).name)
+            return 2
         print()
 
     cache.save()

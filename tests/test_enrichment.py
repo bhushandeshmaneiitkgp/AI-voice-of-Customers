@@ -21,7 +21,9 @@ import pytest
 
 from config.settings import Paths, load_model_registry
 from voc.enrich import (
+    CONSECUTIVE_FAILURE_LIMIT,
     EnrichmentCache,
+    RunAborted,
     build_run_report,
     cache_key,
     chunk_reviews,
@@ -38,8 +40,14 @@ from voc.enrichment_schemas import (
     validate_against_taxonomy,
     verify_grounding,
 )
-from voc.llm import estimate_cost
-from voc.providers import AnthropicProvider, ProviderError, get_provider, resolve_effort
+from voc.llm import estimate_cost, max_tokens_for
+from voc.providers import (
+    AnthropicProvider,
+    ProviderError,
+    classify_error,
+    get_provider,
+    resolve_effort,
+)
 from voc.prompts import build_system_prompt, build_user_message
 from voc.taxonomy import get_taxonomy
 
@@ -700,3 +708,134 @@ def test_stratified_sample_rows_come_from_the_source() -> None:
     sample = stratified_sample(frame, 25)
     assert set(sample["review_id"]) <= set(frame["review_id"])
     assert sample["review_id"].is_unique
+
+
+# ---------------------------------------------------------------------------
+# Failure handling: right-sizing, non-retryable errors, circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_max_tokens_scales_with_group_size() -> None:
+    """Providers reserve credit against max_tokens, so oversizing costs money.
+
+    A flat 8000 made every request unaffordable on a low-balance account and
+    produced 402s before the model ever ran.
+    """
+    assert max_tokens_for(1) < max_tokens_for(5) < max_tokens_for(10)
+    # Smaller than the flat 8000 that priced requests out of a low balance...
+    assert max_tokens_for(5) < 8000
+    # ...but still above the most verbose model measured (qwen at 881/review),
+    # because truncating mid-JSON loses the entire response.
+    assert max_tokens_for(5) >= 5 * 881
+
+
+def test_max_tokens_handles_degenerate_group_size() -> None:
+    assert max_tokens_for(0) == max_tokens_for(1)
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404])
+def test_account_level_errors_are_not_retryable(status: int) -> None:
+    error = classify_error(Exception(f"Error code: {status} - out of credits"))
+    assert error.status_code == status
+    assert error.retryable is False
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503])
+def test_transient_errors_stay_retryable(status: int) -> None:
+    assert classify_error(Exception(f"Error code: {status}")).retryable is True
+
+
+def test_unrecognised_errors_default_to_retryable() -> None:
+    """Safer direction: a needless retry costs one request, a wrong abort loses the run."""
+    assert classify_error(Exception("connection reset by peer")).retryable is True
+
+
+def test_fatal_failures_skip_the_individual_retry_storm(reviews, taxonomy) -> None:
+    """The bug this prevents: 905 group failures fanned out to 4,336 retries.
+
+    Retrying a credit error once per review turns one account problem into
+    thousands of identical doomed requests.
+    """
+    profile = load_model_registry()["opus"]
+    provider = _failing_provider(
+        ProviderError("Error code: 402 - insufficient credits", status_code=402)
+    )
+
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2)
+
+    assert result.fatal is True
+    # One group call, and crucially no per-review retries after it.
+    assert provider.complete.call_count == 1
+    assert any(issue.kind == "api_error_fatal" for issue in result.issues)
+
+
+def test_transient_failures_still_retry(reviews, taxonomy) -> None:
+    """The breaker must not suppress the retry path it was added alongside."""
+    profile = load_model_registry()["opus"]
+    provider = _failing_provider(ProviderError("Error code: 503", status_code=503))
+
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2)
+
+    assert result.fatal is False
+    assert provider.complete.call_count > 1  # group call plus individual retries
+
+
+def test_circuit_breaker_aborts_a_doomed_run(taxonomy) -> None:
+    """A systemic failure must stop the run, not grind through the whole corpus."""
+    frame = pd.DataFrame(
+        {
+            "review_id": [f"id{i:04d}" for i in range(60)],
+            "platform": ["zepto"] * 60,
+            "review_text": [f"review text number {i}" for i in range(60)],
+        }
+    )
+    profile = load_model_registry()["opus"]
+    provider = _failing_provider(
+        ProviderError("Error code: 402 - insufficient credits", status_code=402)
+    )
+
+    with pytest.raises(RunAborted, match="non-retryable"):
+        enrich_sync(frame, taxonomy, profile, provider, reviews_per_request=1)
+
+    # Stopped near the limit rather than attempting all 60.
+    assert provider.complete.call_count <= CONSECUTIVE_FAILURE_LIMIT + 2
+
+
+def test_abort_message_explains_the_cause(taxonomy) -> None:
+    """The operator needs to know it is an account problem, not a bad review."""
+    frame = pd.DataFrame(
+        {
+            "review_id": [f"id{i:04d}" for i in range(20)],
+            "platform": ["zepto"] * 20,
+            "review_text": [f"text {i}" for i in range(20)],
+        }
+    )
+    profile = load_model_registry()["opus"]
+    provider = _failing_provider(ProviderError("Error code: 402", status_code=402))
+
+    with pytest.raises(RunAborted) as excinfo:
+        enrich_sync(frame, taxonomy, profile, provider, reviews_per_request=1)
+
+    message = str(excinfo.value)
+    assert "account-level" in message
+    assert "402" in message
+
+
+def test_breaker_resets_after_a_success(reviews, taxonomy) -> None:
+    """Isolated failures must not accumulate toward an abort across a long run."""
+    profile = load_model_registry()["opus"]
+    provider = MagicMock()
+    provider.supports_batch = False
+    # Groups are processed in order, so the second response must carry the
+    # SECOND review's id -- a mismatched id is correctly discarded.
+    provider.complete.side_effect = [
+        ProviderError("Error code: 402", status_code=402),
+        CompletionResult(text=json.dumps({"results": [_enrichment(reviews.loc[1, "review_id"])]})),
+    ]
+
+    result = enrich_sync(
+        reviews, taxonomy, profile, provider, reviews_per_request=1, retry_missing=False
+    )
+    # One failure then one success: below the breaker limit, so the run finished.
+    assert len(result.enrichments) == 1
+    assert provider.complete.call_count == 2

@@ -45,7 +45,7 @@ from voc.enrichment_schemas import (
     validate_against_taxonomy,
     verify_grounding,
 )
-from voc.llm import DEFAULT_REVIEWS_PER_REQUEST
+from voc.llm import DEFAULT_REVIEWS_PER_REQUEST, max_tokens_for
 from voc.providers import LLMProvider, ProviderError, normalise_usage
 from voc.prompts import build_system_prompt, build_user_message
 from voc.taxonomy import Taxonomy
@@ -55,6 +55,16 @@ logger = logging.getLogger(__name__)
 #: Bump when the prompt or schema changes in a way that invalidates cached
 #: responses. Part of the cache key, so old entries are simply not reused.
 PROMPT_VERSION = "v1"
+
+#: Abort a run after this many consecutive non-retryable failures. A systemic
+#: problem -- exhausted credit, revoked key -- fails every request identically,
+#: and grinding through the remaining thousands produces nothing but noise and
+#: a long wait. Small enough to stop fast, large enough to ride out a blip.
+CONSECUTIVE_FAILURE_LIMIT = 5
+
+
+class RunAborted(RuntimeError):
+    """Raised when a run is stopped early because every request is failing."""
 
 
 @dataclass
@@ -68,6 +78,8 @@ class EnrichmentResult:
     usage: dict[str, int] = field(default_factory=dict)
     requests_made: int = 0
     cache_hits: int = 0
+    #: True when a failure is systemic (bad key, no credit) rather than transient.
+    fatal: bool = False
 
     @property
     def enriched_ids(self) -> set[str]:
@@ -80,6 +92,7 @@ class EnrichmentResult:
         self.grounding_rates.update(other.grounding_rates)
         self.requests_made += other.requests_made
         self.cache_hits += other.cache_hits
+        self.fatal = self.fatal or other.fatal
         for key, value in other.usage.items():
             self.usage[key] = self.usage.get(key, 0) + value
 
@@ -299,25 +312,45 @@ def enrich_sync(
         """
         try:
             completion = provider.complete(
-                profile, system_prompt, build_user_message(group), schema, effort=effort
+                profile, system_prompt, build_user_message(group), schema,
+                effort=effort, max_tokens=max_tokens_for(len(group)),
             )
         except Exception as exc:  # noqa: BLE001 - recorded, run continues
-            logger.error("Request failed for %d review(s): %s", len(group), exc)
+            retryable = getattr(exc, "retryable", True)
+            logger.error(
+                "Request failed for %d review(s)%s: %s",
+                len(group), "" if retryable else " [non-retryable]", exc,
+            )
             failure = EnrichmentResult(
                 failed_review_ids=group["review_id"].tolist(),
                 issues=[
                     ValidationIssue(
-                        review_id="<group>", kind="api_error", detail=str(exc)[:300]
+                        review_id="<group>",
+                        kind="api_error" if retryable else "api_error_fatal",
+                        detail=str(exc)[:300],
                     )
                 ],
             )
+            failure.fatal = not retryable
             return group, failure, {}
 
         group_result = parse_and_validate(completion.text, group, taxonomy)
         group_result.requests_made = 1
         return group, group_result, completion.usage
 
+    consecutive_fatal = 0
+
     def absorb(group_result: EnrichmentResult, usage: dict[str, int]) -> None:
+        """Fold one group's outcome in, tripping the breaker on repeated fatals."""
+        nonlocal consecutive_fatal
+        consecutive_fatal = consecutive_fatal + 1 if group_result.fatal else 0
+        if consecutive_fatal >= CONSECUTIVE_FAILURE_LIMIT:
+            raise RunAborted(
+                f"{consecutive_fatal} consecutive non-retryable failures -- stopping. "
+                "This is an account-level problem (credit, key, or model access), not a "
+                "per-request one, so continuing would fail every remaining review. "
+                f"Last error: {group_result.issues[-1].detail if group_result.issues else 'unknown'}"
+            )
         result.merge(group_result)
         for key, value in usage.items():
             result.usage[key] = result.usage.get(key, 0) + value
@@ -347,8 +380,14 @@ def enrich_sync(
                 progress(index, len(groups))
 
     # A review the model skipped in a group usually succeeds on its own, so
-    # retry individually rather than losing it.
-    if retry_missing and result.failed_review_ids:
+    # retry individually rather than losing it. Skipped entirely when the run
+    # hit a systemic failure: retrying a credit or auth error once per review
+    # turns one problem into thousands of identical doomed requests.
+    if result.fatal:
+        logger.error(
+            "Skipping individual retries: the failure is account-level, not per-request."
+        )
+    elif retry_missing and result.failed_review_ids:
         retry_ids = list(dict.fromkeys(result.failed_review_ids))
         retry_frame = frame[frame["review_id"].isin(retry_ids)]
         if not retry_frame.empty:

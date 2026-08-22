@@ -26,9 +26,11 @@ def test_registry_profiles_are_well_formed() -> None:
     for key, profile in load_model_registry().items():
         assert profile.key == key
         assert profile.model_id, f"{key} has no model_id"
-        # Locally hosted models are genuinely free, so zero is valid there and
-        # only there -- a hosted model priced at zero is a transcription error.
-        floor = 0.0 if profile.tier == "local" else 0.0001
+        # Zero is valid only where it is genuinely free: a local model, or a
+        # provider free tier. Anywhere else a zero price is a transcription
+        # error that would make the cost estimate silently useless.
+        free_by_design = profile.tier in ("local", "free")
+        floor = 0.0 if free_by_design else 0.0001
         assert profile.input_price_per_mtok >= floor, key
         assert profile.output_price_per_mtok >= floor, key
         assert 0 < profile.batch_discount <= 1

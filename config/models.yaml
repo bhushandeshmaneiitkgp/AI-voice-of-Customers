@@ -141,7 +141,7 @@ profiles:
     base_url: https://openrouter.ai/api/v1
     model_id: openai/gpt-oss-20b:free
     display_name: gpt-oss 20B (free tier)
-    tier: open
+    tier: free
     context_window: 131072
     input_price_per_mtok: 0.0
     output_price_per_mtok: 0.0

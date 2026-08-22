@@ -10,7 +10,8 @@ product opportunities, RICE prioritisation, and experiment plans.
 > the Streamlit UI are scheduled — see [Roadmap](#roadmap).
 >
 > Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
-> summary) · [`docs/TAXONOMY.md`](docs/TAXONOMY.md) · [`reports/EDA_REPORT.md`](reports/EDA_REPORT.md)
+> summary) · [`docs/TAXONOMY.md`](docs/TAXONOMY.md) · [`docs/MODEL_BENCHMARK.md`](docs/MODEL_BENCHMARK.md)
+> · [`reports/EDA_REPORT.md`](reports/EDA_REPORT.md)
 
 ---
 

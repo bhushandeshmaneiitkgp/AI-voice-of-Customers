@@ -1,0 +1,167 @@
+# Model Benchmark — Enrichment
+
+**2026-08-21** · 99 reviews · identical prompt, schema, and validators · [`config/models.yaml`](../config/models.yaml)
+
+Input to the Phase 9 evaluation framework. The point of the configurable-model
+architecture was to turn "which model should we use?" from an assumption into a
+measurement; this is that measurement.
+
+---
+
+## Method
+
+Both models received:
+
+- the **same 99 reviews** — a stratified sample by platform × rating bucket, so a
+  78%-negative corpus still exercises the strength vocabulary
+- the **same system prompt**, generated from `config/taxonomy.yaml`
+- the **same JSON schema**, with enums injected from the taxonomy
+- the **same three validators**: schema → taxonomy → grounding
+
+A test (`test_both_providers_receive_the_identical_schema`) asserts the first two,
+because a benchmark where the adapter varies measures the adapter, not the model.
+
+The star rating is deliberately withheld from the prompt, so `sentiment` is derived
+from text alone.
+
+---
+
+## Results
+
+| Metric | **llama70b** | **qwen72b** |
+|---|---|---|
+| Model | `meta-llama/llama-3.3-70b-instruct` | `qwen/qwen-2.5-72b-instruct` |
+| **Coverage** | **99/99 (100%)** | 95/99 (96.0%) |
+| **Grounding** (spans verbatim) | 98.2% | **98.7%** |
+| Fully-grounded reviews | 96.0% | 96.0% |
+| Areas per review | 2.43 | 2.47 |
+| Output tokens per review | **251** | 881 |
+| Mean confidence | 0.868 | 0.918 |
+| **Cost, full 4,620 corpus** | **~$0.96** | ~$3.20 |
+
+### Validation issues
+
+| Issue | llama70b | qwen72b |
+|---|---|---|
+| `unparseable_response` | 2 | **6** |
+| `unknown_area` (invented category) | 4 | 2 |
+| `duplicate_label` | 4 | **0** |
+| `ungrounded_evidence` | 4 | 1 |
+| `unknown_issue_type` | 3 | 2 |
+| `missing_polarity` | 3 | 2 |
+
+The split is consistent: **qwen has better taxonomy discipline, llama has better
+JSON reliability.** qwen's 6 parse failures are what cost it 4 reviews of coverage.
+
+---
+
+## What this overturned
+
+**The prediction was wrong.** Before running, the stated expectation was 50–70%
+grounding for open models against 85–95% for a frontier model, on the reasoning that
+smaller models paraphrase rather than quote. Both open models landed at **98%+**.
+
+That was the single largest risk identified in moving off a frontier provider, and it
+did not materialise. Recording it because a benchmark that only ever confirms the
+prior is not doing any work.
+
+**A second assumption also fell.** The registry described qwen as "often better at
+strict JSON adherence". It produced three times as many unparseable responses. The
+note in `config/models.yaml` now records the contradiction rather than quietly
+dropping the claim.
+
+---
+
+## Model agreement — the useful signal
+
+Measured on the 95 reviews both models labelled:
+
+| Field | Agreement |
+|---|---|
+| `sentiment` | 96.8% |
+| `customer_intent` | 90.5% |
+| `support_escalation` | 89.5% |
+| `product_area` (Jaccard) | **82.5%** |
+| `product_area` (exact set match) | **58/95 (61%)** |
+
+The models agree strongly on *how the customer feels* and much less on *which product
+areas apply*. Only 61% of reviews get an identical area set.
+
+This is the most useful number in the document. It says the disagreement is
+concentrated in exactly the task the Phase 9 gold set exists to adjudicate, and that
+a single-model run would give a false impression of certainty about area assignment.
+It also means **inter-model agreement is a usable proxy for label difficulty**: the
+39% of reviews where they differ are the ones a human should label first.
+
+Both models independently ranked `customer_support` as the largest area (41 and 42
+labels), matching the Phase 2 keyword-probe estimate of 28.0%. Areas-per-review of
+2.43 and 2.47 also sit close to the probe estimate of 2.19 — the multi-label design
+is corroborated by three independent methods.
+
+---
+
+## The validators earned their place
+
+Not theoretical — each caught something in this run:
+
+**The elision check** rejected stitched quotes from *both* models, e.g.
+`"Products are not availab...y use are not available"`. This is precisely the
+paraphrase-instead-of-quote failure the grounding metric exists to catch, and it was
+caught at the schema boundary before it could enter the dataset.
+
+**The individual-retry path** recovered 9 llama reviews from failed groups, taking
+coverage from ~91% to 100%. Without it, grouping 5 reviews per request would have
+cost real coverage.
+
+**Taxonomy validation** caught invented categories in both models (4 and 2). These
+were well-formed, plausible-sounding labels that simply are not in the taxonomy —
+undetectable by schema validation alone.
+
+---
+
+## Caveats
+
+**qwen's numbers are not from a single clean run.** Its first attempt hit OpenRouter's
+`in_flight_budget_exhausted` limit (HTTP 402) on 32 requests — an account concurrency
+ceiling, not a model failure. It was completed at lower concurrency with a different
+`--reviews-per-request` (3 vs 5), which inflates its input-token count through extra
+system-prompt repeats. The **output tokens per review** figure (251 vs 881) is the
+clean cost signal; the $3.20 extrapolation is derived from it rather than from the raw
+two-run total of $5.08.
+
+**99 reviews is a small sample.** Differences of a few percentage points here are not
+significant. The findings that carry weight are the large ones: 3.5× output verbosity,
+the 61% exact-match rate, and grounding being high for both rather than low.
+
+**No ground truth yet.** Agreement is not accuracy. Both models could be
+wrong in the same way, and neither number becomes an accuracy claim until the Phase 9
+hand-labelled gold set exists.
+
+---
+
+## Decision
+
+**llama70b**, for the full corpus.
+
+Equal grounding, better coverage, cleaner JSON, and ~3.3× cheaper. qwen's advantage in
+taxonomy discipline does not offset losing 4% of reviews to parse failures — and the
+taxonomy errors are caught and reported by the validators anyway, while dropped
+reviews are simply absent.
+
+**Not chosen on price.** `gptoss` (`openai/gpt-oss-120b`) is now the cheapest entry in
+the registry at $0.03/$0.17 per MTok, below llama70b. It is deliberately not the
+default because it has not been benchmarked, and selecting on price alone is the exact
+mistake the qwen pricing error above already caused once.
+
+### Reproduce
+
+```bash
+VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100
+```
+
+```bash
+VOC_ENRICHMENT_MODEL=qwen72b python scripts/04_run_enrichment.py --sample 100 --concurrency 2
+```
+
+Per-model caches in `artifacts/enrichment_cache_<model>.json` keep runs isolated, so a
+re-run costs nothing and cannot cross-contaminate a comparison.

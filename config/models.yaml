@@ -29,10 +29,15 @@
 # -----------------------------------------------------------------------------
 # PRICING
 #
-# USD per million tokens. Anthropic figures are first-party rates verified
-# 2026-08-21. OPENROUTER FIGURES ARE APPROXIMATE and change frequently --
-# check https://openrouter.ai/models before quoting a cost anywhere that
-# matters. The pipeline's cost estimate is only as good as these numbers.
+# USD per million tokens. Anthropic figures are first-party rates; OpenRouter
+# figures were read from the live catalogue at
+# https://openrouter.ai/api/v1/models on 2026-08-21, correcting an earlier set
+# of estimates that were wrong by up to 3x (qwen72b input was 0.13 against a
+# real 0.36 -- enough to change which model looks cheapest).
+#
+# These change. Re-read the live catalogue before quoting a cost anywhere that
+# matters: the pipeline's estimate is only as good as these numbers, and an
+# estimate that flatters a run is worse than no estimate at all.
 #
 # `batch_discount: 1.0` means no batch discount is available (the default
 # everywhere except Anthropic).
@@ -54,18 +59,19 @@ profiles:
     display_name: Llama 3.3 70B Instruct
     tier: open
     context_window: 131072
-    input_price_per_mtok: 0.12
-    output_price_per_mtok: 0.30
+    input_price_per_mtok: 0.10
+    output_price_per_mtok: 0.32
     batch_discount: 1.0
     structured_output: json_schema
     thinking_style: budget      # no adaptive thinking; effort is not a parameter
     supports_effort: false
     default_effort: null
     notes: >
-      Solid open-weight all-rounder and the default enrichment model. Strong
-      instruction following for its price. Watch the grounding rate: open
-      models paraphrase more than frontier ones, and verbatim evidence spans
-      are what the whole evidence chain rests on.
+      Default enrichment model, chosen on measured results rather than price.
+      100-review benchmark (2026-08-21): 100% coverage, 98.2% of evidence spans
+      verified verbatim, 2.43 areas/review, 251 output tokens/review, ~$0.96 for
+      the full 4,620 corpus. The concern that open models would paraphrase
+      instead of quoting did not materialise -- see docs/EVALUATION notes.
 
   qwen72b:
     provider: openrouter
@@ -74,7 +80,7 @@ profiles:
     display_name: Qwen 2.5 72B Instruct
     tier: open
     context_window: 131072
-    input_price_per_mtok: 0.13
+    input_price_per_mtok: 0.36
     output_price_per_mtok: 0.40
     batch_discount: 1.0
     structured_output: json_schema
@@ -82,8 +88,13 @@ profiles:
     supports_effort: false
     default_effort: null
     notes: >
-      Comparable to Llama 3.3 70B and often better at strict JSON adherence.
-      The natural second arm of the open-model benchmark.
+      Second arm of the open-model benchmark. 100-review run: 98.7% grounding
+      (marginally best) and cleaner taxonomy discipline (0 duplicate labels vs
+      llama's 4), but 6 unparseable responses against llama's 2, which cost it
+      4 reviews of coverage (96.0% vs 100%). Also 3.5x more verbose -- 881
+      output tokens/review vs 251 -- so roughly 3x the cost for no quality gain.
+      The earlier claim here that it was "better at strict JSON adherence" was
+      an assumption, and the benchmark contradicted it.
 
   deepseek:
     provider: openrouter
@@ -92,8 +103,8 @@ profiles:
     display_name: DeepSeek V3
     tier: open
     context_window: 65536
-    input_price_per_mtok: 0.28
-    output_price_per_mtok: 1.10
+    input_price_per_mtok: 0.26
+    output_price_per_mtok: 1.03
     batch_discount: 1.0
     structured_output: json_object
     thinking_style: budget
@@ -112,16 +123,18 @@ profiles:
     display_name: gpt-oss 120B
     tier: open
     context_window: 131072
-    input_price_per_mtok: 0.10
-    output_price_per_mtok: 0.50
+    input_price_per_mtok: 0.03
+    output_price_per_mtok: 0.17
     batch_discount: 1.0
     structured_output: json_schema
     thinking_style: budget
     supports_effort: false
     default_effort: null
     notes: >
-      Open-weights model with good structured-output behaviour. Useful third
-      arm for the benchmark.
+      Cheapest option in the registry at $0.03/$0.17 per MTok -- below llama70b.
+      NOT yet benchmarked, so it is not the default: choosing it on price alone
+      would repeat the mistake the qwen note above records. Worth a 100-review
+      run before the next full pass.
 
   # ===========================================================================
   # Anthropic -- retained as the frontier control arm for EVALUATION.md

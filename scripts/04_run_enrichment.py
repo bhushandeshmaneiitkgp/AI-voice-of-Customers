@@ -11,9 +11,15 @@ never hardcoded:
     # smoke test — 20 reviews on the default open model, costs ~1 cent
     python scripts/04_run_enrichment.py --sample 20
 
-    # benchmark two models on the SAME reviews (the Phase 9 deliverable)
+    # benchmark two models on the SAME reviews (the Phase 9 deliverable).
+    # --sample 100 yields 99 reviews: strata round down independently.
     VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100
     VOC_ENRICHMENT_MODEL=qwen72b  python scripts/04_run_enrichment.py --sample 100
+
+    # re-benchmark with fresh live answers -- bypasses cached reads so token,
+    # cost and coverage figures describe THIS run. Adds to the cache, never
+    # clears it, so nothing already paid for is lost.
+    VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100 --no-cache
 
     # full corpus; --batch is honoured only where the provider supports it,
     # otherwise it falls back to concurrent live requests
@@ -83,6 +89,11 @@ def main() -> int:
         "--concurrency", type=int, default=8,
         help="Parallel requests for providers without a batch endpoint.",
     )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Ignore cached answers and call the API for every review. Results are still "
+             "written to the cache; existing entries are kept, never deleted.",
+    )
     parser.add_argument("--yes", action="store_true", help="Skip the cost confirmation prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Estimate cost and exit without calling the API.")
     parser.add_argument("--seed", type=int, default=42, help="Sampling seed.")
@@ -146,6 +157,9 @@ def main() -> int:
     print(f"  Prompt           : ~{len(system_prompt) // 4:,} tokens (cached across requests)")
     batch_note = "Batch API" if (args.batch and profile.provider == "anthropic") else f"live, {args.concurrency} concurrent"
     print(f"  Transport        : {batch_note}")
+    print(f"  Cache            : "
+          + ("BYPASSED (--no-cache) — every review billed live; existing entries kept"
+             if args.no_cache else "read-through — cached reviews cost nothing"))
     print("-" * 78)
     print(f"  ESTIMATE         : {estimate.summary(args.batch)}")
     print(f"  (standard ${estimate.usd_standard:,.2f} / batch ${estimate.usd_batch:,.2f}. "
@@ -174,8 +188,9 @@ def main() -> int:
         print()
         print("  Open models are ~10x cheaper but paraphrase more, which shows up as a")
         print("  lower grounding rate. Benchmark before committing: run --sample 100 on")
-        print("  two models and compare grounding and validation issues. That comparison")
-        print("  is itself a Phase 9 deliverable.")
+        print("  two models (99 reviews after stratified rounding) and compare grounding")
+        print("  and validation issues. Add --no-cache to re-benchmark on fresh answers.")
+        print("  That comparison is itself a Phase 9 deliverable.")
     print("=" * 78)
     print()
 
@@ -198,7 +213,19 @@ def main() -> int:
         log.error("%s", exc)
         return 1
 
-    cache = EnrichmentCache(Paths.enrichment_cache(profile.key))
+    # A read bypass, not a reset: the file is still loaded and still written,
+    # so a fresh benchmark costs its own requests without discarding anyone
+    # else's. The cost estimate above already assumed every review is billed,
+    # so --no-cache makes the run match the quote rather than beat it.
+    cache = EnrichmentCache(
+        Paths.enrichment_cache(profile.key), read_through=not args.no_cache
+    )
+    if args.no_cache and len(cache):
+        log.info(
+            "Bypassing %d cached enrichment(s) in %s; they are preserved and "
+            "will be updated, not removed.",
+            len(cache), Paths.enrichment_cache(profile.key).name,
+        )
 
     use_batch = args.batch and provider.supports_batch
     if args.batch and not provider.supports_batch:
@@ -250,7 +277,7 @@ def main() -> int:
     cache.save()
 
     reviews, labels = to_dataframes(result, frame)
-    report = build_run_report(result, frame, profile, use_batch)
+    report = build_run_report(result, frame, profile, use_batch, cache_bypassed=args.no_cache)
 
     if not reviews.empty:
         reviews.to_parquet(Paths.enriched_reviews, index=False)

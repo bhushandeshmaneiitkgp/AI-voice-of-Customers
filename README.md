@@ -166,6 +166,15 @@ Then smoke-test on 20 reviews (about one cent):
 python scripts/04_run_enrichment.py --sample 20
 ```
 
+Answers are cached per model in `artifacts/`, so a repeated run is free — and, for the
+same reason, reports whatever the first run measured. When the numbers themselves are
+the point, `--no-cache` forces a live request per review. It bypasses cache *reads*
+only: existing entries are kept and updated, never cleared.
+
+```bash
+python scripts/04_run_enrichment.py --sample 20 --no-cache
+```
+
 Run the tests:
 
 ```bash
@@ -356,6 +365,10 @@ No model ID appears in any `.py` file — a test enforces this. Models are defin
 ```bash
 VOC_ENRICHMENT_MODEL=qwen72b python scripts/04_run_enrichment.py --sample 100
 ```
+
+That flag requests 100; proportional stratification rounds each stratum down
+independently, so it yields 99 — which is why
+[`docs/MODEL_BENCHMARK.md`](docs/MODEL_BENCHMARK.md) reports a **99-review** benchmark.
 
 This exists so Phase 9 can run the *same* pipeline under different models and score
 each against the gold set, turning a cost question into a documented result rather

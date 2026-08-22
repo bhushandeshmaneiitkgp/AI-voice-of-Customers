@@ -68,7 +68,7 @@ profiles:
     default_effort: null
     notes: >
       Default enrichment model, chosen on measured results rather than price.
-      100-review benchmark (2026-08-21): 100% coverage, 98.2% of evidence spans
+      99-review benchmark (2026-08-21): 100% coverage, 98.2% of evidence spans
       verified verbatim, 2.43 areas/review, 251 output tokens/review, ~$0.96 for
       the full 4,620 corpus. The concern that open models would paraphrase
       instead of quoting did not materialise -- see docs/EVALUATION notes.
@@ -88,7 +88,7 @@ profiles:
     supports_effort: false
     default_effort: null
     notes: >
-      Second arm of the open-model benchmark. 100-review run: 98.7% grounding
+      Second arm of the open-model benchmark. 99-review run: 98.7% grounding
       (marginally best) and cleaner taxonomy discipline (0 duplicate labels vs
       llama's 4), but 6 unparseable responses against llama's 2, which cost it
       4 reviews of coverage (96.0% vs 100%). Also 3.5x more verbose -- 881
@@ -133,8 +133,8 @@ profiles:
     notes: >
       Cheapest option in the registry at $0.03/$0.17 per MTok -- below llama70b.
       NOT yet benchmarked, so it is not the default: choosing it on price alone
-      would repeat the mistake the qwen note above records. Worth a 100-review
-      run before the next full pass.
+      would repeat the mistake the qwen note above records. Worth a run on the
+      same 99-review sample before the next full pass.
 
   gptoss_free:
     provider: openrouter
@@ -152,7 +152,7 @@ profiles:
     default_effort: null
     notes: >
       DOES NOT WORK as of 2026-08-21 -- kept only to record the finding.
-      A 100-review attempt returned 18 of 20 requests as HTTP 404: "This model
+      A 99-review attempt returned 18 of 20 requests as HTTP 404: "This model
       is unavailable for free. The paid version is available now - use this slug
       instead: openai/gpt-oss-20b". OpenRouter is withdrawing the :free variant;
       it appeared in the catalogue with pricing 0.0 but is refused at call time,

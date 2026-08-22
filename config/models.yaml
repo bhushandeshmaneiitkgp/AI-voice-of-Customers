@@ -151,13 +151,14 @@ profiles:
     supports_effort: false
     default_effort: null
     notes: >
-      Zero cost. The only free-tier OpenRouter model that supports json_schema,
-      checked against the live catalogue on 2026-08-21. Useful when the account
-      has no credit -- a paid run on this corpus costs about $1, so this is a
-      fallback rather than a first choice. NOT benchmarked: at 20B it is a third
-      the size of llama70b, so expect a lower grounding rate, and measure it
-      with --sample 100 before trusting a full pass. Free tiers also carry
-      tighter rate limits, so use a low --concurrency.
+      DOES NOT WORK as of 2026-08-21 -- kept only to record the finding.
+      A 100-review attempt returned 18 of 20 requests as HTTP 404: "This model
+      is unavailable for free. The paid version is available now - use this slug
+      instead: openai/gpt-oss-20b". OpenRouter is withdrawing the :free variant;
+      it appeared in the catalogue with pricing 0.0 but is refused at call time,
+      so catalogue presence is not availability. Zero usable enrichments.
+      Use openai/gpt-oss-20b (paid, ~$0.03/$0.17 per MTok) instead, or llama70b
+      which is already benchmarked.
 
   # ===========================================================================
   # Anthropic -- retained as the frontier control arm for EVALUATION.md

@@ -227,6 +227,36 @@ class EnrichmentCache:
 # ---------------------------------------------------------------------------
 
 
+def normalise_response_shape(parsed: Any) -> dict[str, Any]:
+    """Accept the shape variations models produce around the requested schema.
+
+    The contract asks for ``{"results": [...]}``. Weaker models routinely return
+    the array on its own, or wrap it under a differently-named key. That is a
+    presentation difference, not a content one -- the same reasoning as
+    stripping markdown fences -- so it is normalised rather than rejected.
+
+    Anything genuinely unrecognisable is returned untouched, so the Pydantic
+    validation immediately after produces the error message.
+    """
+    if isinstance(parsed, list):
+        return {"results": parsed}
+
+    if isinstance(parsed, dict):
+        if "results" in parsed:
+            return parsed
+        # A single-key object wrapping the array under another name, e.g.
+        # {"reviews": [...]} or {"enrichments": [...]}.
+        if len(parsed) == 1:
+            (only_value,) = parsed.values()
+            if isinstance(only_value, list):
+                return {"results": only_value}
+        # A single enrichment returned unwrapped, without the list.
+        if "review_id" in parsed:
+            return {"results": [parsed]}
+
+    return parsed
+
+
 def parse_and_validate(
     payload: str,
     requested: pd.DataFrame,
@@ -241,15 +271,20 @@ def parse_and_validate(
     result = EnrichmentResult()
 
     try:
-        parsed = EnrichmentBatchResponse(**json.loads(payload))
-    except (json.JSONDecodeError, ValidationError) as exc:
+        parsed = EnrichmentBatchResponse(**normalise_response_shape(json.loads(payload)))
+    except Exception as exc:  # noqa: BLE001 - any malformed shape is data, not a crash
+        # Deliberately broad. Everything reaching here is untrusted model
+        # output, and the only correct response to an unexpected shape is to
+        # record it and move on. A narrower clause let a TypeError escape a
+        # worker thread and kill a whole run when one model returned a bare
+        # JSON array instead of an object.
         logger.warning("Unparseable response for %d review(s): %s", len(requested), exc)
         result.failed_review_ids.extend(requested["review_id"].tolist())
         result.issues.append(
             ValidationIssue(
                 review_id="<group>",
                 kind="unparseable_response",
-                detail=str(exc)[:300],
+                detail=f"{type(exc).__name__}: {exc}"[:300],
             )
         )
         return result
@@ -345,6 +380,10 @@ def enrich_sync(
 
         Returns the group alongside its result so the caller can reconcile even
         when responses arrive out of order under concurrency.
+
+        Nothing may escape this function. It runs inside a thread pool, and an
+        uncaught exception surfaces at ``future.result()`` and tears down the
+        entire run -- losing every group still in flight over one bad response.
         """
         try:
             completion = provider.complete(
@@ -370,7 +409,25 @@ def enrich_sync(
             failure.fatal = not retryable
             return group, failure, {}
 
-        group_result = parse_and_validate(completion.text, group, taxonomy)
+        try:
+            group_result = parse_and_validate(completion.text, group, taxonomy)
+        except Exception as exc:  # noqa: BLE001 - last line of defence
+            # parse_and_validate already contains its own broad handler; this
+            # exists so that a defect anywhere in validation degrades one group
+            # instead of terminating the run from inside a worker thread.
+            logger.exception("Validation crashed for %d review(s)", len(group))
+            failure = EnrichmentResult(
+                failed_review_ids=group["review_id"].tolist(),
+                issues=[
+                    ValidationIssue(
+                        review_id="<group>",
+                        kind="validation_crash",
+                        detail=f"{type(exc).__name__}: {exc}"[:300],
+                    )
+                ],
+            )
+            return group, failure, completion.usage
+
         group_result.requests_made = 1
         return group, group_result, completion.usage
 

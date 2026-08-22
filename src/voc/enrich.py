@@ -130,6 +130,12 @@ def stratified_sample(
     columns, so the obvious version silently returns a frame with no
     ``platform`` column -- which then fails much later, while building a
     request, looking like an API problem rather than a sampling one.
+
+    **The result can be slightly smaller than ``n``.** Each stratum is sampled
+    at ``frac`` and rounds down independently, so the pieces need not add back
+    up: ``n=100`` over this corpus yields 99. That is a property of proportional
+    stratification, not a bug -- but it means the requested size is not the
+    sample size, and anything reporting on a run must use ``len(frame)``.
     """
     if n >= len(frame):
         return frame.reset_index(drop=True)
@@ -168,11 +174,25 @@ class EnrichmentCache:
     long run that dies partway should cost the work in flight, not the whole
     session -- and a process killed mid-write must not leave a half-written
     file that reads as corrupt on the next attempt.
+
+    ``read_through=False`` (the ``--no-cache`` flag) makes every lookup miss, so
+    a benchmark measures the model rather than replaying a previous run's
+    answers. It is deliberately a *read* bypass only: existing entries are still
+    loaded, still written back, and never cleared. A fresh run therefore merges
+    into the file instead of replacing it, which keeps the reviews it did not
+    touch intact and keeps crash-resume working. Discarding the cache to get a
+    clean measurement would throw away paid-for work to buy a number.
     """
 
-    def __init__(self, path: Path, autosave_every: int = CACHE_AUTOSAVE_EVERY) -> None:
+    def __init__(
+        self,
+        path: Path,
+        autosave_every: int = CACHE_AUTOSAVE_EVERY,
+        read_through: bool = True,
+    ) -> None:
         self.path = path
         self.autosave_every = autosave_every
+        self.read_through = read_through
         self._entries: dict[str, dict[str, Any]] = {}
         self._unsaved = 0
         if path.exists():
@@ -190,6 +210,10 @@ class EnrichmentCache:
         return self._unsaved
 
     def get(self, key: str) -> ReviewEnrichment | None:
+        if not self.read_through:
+            # Every review must cost a live request, otherwise coverage,
+            # token counts and latency describe whichever run filled the cache.
+            return None
         raw = self._entries.get(key)
         if raw is None:
             return None
@@ -702,8 +726,15 @@ def build_run_report(
     frame: pd.DataFrame,
     profile: ModelProfile,
     use_batch: bool,
+    cache_bypassed: bool = False,
 ) -> dict[str, Any]:
-    """Summarise a run: coverage, quality, and cost. Written to JSON."""
+    """Summarise a run: coverage, quality, and cost. Written to JSON.
+
+    ``cache_bypassed`` is recorded because it decides how the numbers may be
+    read. A run that served most reviews from cache has honest coverage but
+    meaningless token, cost and latency figures, and the report is the only
+    place a later reader can tell the two apart.
+    """
     issue_counts: dict[str, int] = {}
     for issue in result.issues:
         issue_counts[issue.kind] = issue_counts.get(issue.kind, 0) + 1
@@ -716,6 +747,7 @@ def build_run_report(
         "model_key": profile.key,
         "prompt_version": PROMPT_VERSION,
         "transport": "batch" if use_batch else "sync",
+        "cache_bypassed": cache_bypassed,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "reviews_requested": len(frame),
         "reviews_enriched": len(result.enrichments),

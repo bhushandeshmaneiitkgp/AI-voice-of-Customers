@@ -27,7 +27,7 @@ __all__ = [
     "resolve_effort",
 ]
 
-# Measured output per enriched review, from the 100-review benchmark:
+# Measured output per enriched review, from the 99-review benchmark:
 # llama70b 251 tokens/review, qwen72b 881. Sized for the VERBOSE case with
 # headroom -- undersizing truncates mid-JSON and loses the whole response,
 # which is far worse than reserving a few hundred unused tokens.

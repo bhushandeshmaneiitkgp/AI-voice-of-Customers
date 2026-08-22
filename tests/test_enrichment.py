@@ -993,3 +993,118 @@ def test_worker_contains_a_validation_crash(reviews, taxonomy, monkeypatch) -> N
 
     assert any(issue.kind == "validation_crash" for issue in result.issues)
     assert set(result.failed_review_ids) == set(reviews["review_id"])
+
+
+# ---------------------------------------------------------------------------
+# Cache bypass (--no-cache)
+# ---------------------------------------------------------------------------
+
+
+def test_no_cache_calls_the_api_for_every_review(reviews, taxonomy, tmp_path) -> None:
+    """A benchmark must measure the model, not replay a previous run.
+
+    With the cache warm, an ordinary run makes zero requests -- which is the
+    point of the cache, and exactly why token, cost and latency figures from
+    such a run describe whoever filled it. --no-cache is what makes a re-run
+    a measurement again.
+    """
+    profile = load_model_registry()["opus"]
+    path = tmp_path / "cache.json"
+    warm = EnrichmentCache(path)
+    for review_id in reviews["review_id"]:
+        warm.put(cache_key(review_id, profile), ReviewEnrichment(**_enrichment(review_id)))
+    warm.save()
+
+    cache = EnrichmentCache(path, read_through=False)
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2, cache=cache)
+
+    assert result.cache_hits == 0
+    assert result.requests_made == 1
+    provider.complete.assert_called_once()
+
+
+def test_no_cache_does_not_discard_existing_entries(tmp_path) -> None:
+    """The bypass is read-only. Entries survive being ignored.
+
+    A --no-cache that cleared the file would buy a clean measurement with work
+    already paid for, and would take unrelated reviews down with it.
+    """
+    path = tmp_path / "cache.json"
+    warm = EnrichmentCache(path)
+    for i in range(3):
+        warm.put(f"k{i}", ReviewEnrichment(**_enrichment(f"r{i}")))
+    warm.save()
+
+    bypassed = EnrichmentCache(path, read_through=False)
+    assert len(bypassed) == 3, "existing entries must still be loaded"
+    assert bypassed.get("k0") is None, "but must not be served"
+
+    bypassed.put("k9", ReviewEnrichment(**_enrichment("r9")))
+    bypassed.save()
+
+    # Fresh work merged in; nothing removed.
+    reloaded = EnrichmentCache(path)
+    assert len(reloaded) == 4
+    assert reloaded.get("k0") is not None
+
+
+def test_no_cache_still_persists_fresh_results(reviews, taxonomy, tmp_path) -> None:
+    """A bypassed run must remain resumable if it dies partway."""
+    profile = load_model_registry()["opus"]
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path, read_through=False)
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+
+    enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2, cache=cache)
+    cache.save()
+
+    assert len(EnrichmentCache(path)) == 2
+
+
+def test_cache_is_read_through_by_default(tmp_path) -> None:
+    """Opting out must be explicit; the default may not silently re-bill a run."""
+    cache = EnrichmentCache(tmp_path / "cache.json")
+    cache.put("k1", ReviewEnrichment(**_enrichment("r1")))
+    assert cache.read_through is True
+    assert cache.get("k1") is not None
+
+
+def test_run_report_records_whether_the_cache_was_bypassed(reviews, taxonomy) -> None:
+    """Metrics need provenance: a replayed run and a fresh one read identically."""
+    profile = load_model_registry()["opus"]
+    provider = _mock_provider([[_enrichment(rid) for rid in reviews["review_id"]]])
+    result = enrich_sync(reviews, taxonomy, profile, provider, reviews_per_request=2)
+
+    assert build_run_report(result, reviews, profile, False)["cache_bypassed"] is False
+    assert build_run_report(
+        result, reviews, profile, False, cache_bypassed=True
+    )["cache_bypassed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Stratified sample size
+# ---------------------------------------------------------------------------
+
+
+def test_stratified_sample_can_undershoot_the_requested_size() -> None:
+    """--sample 100 produced 99, and reporting must use the actual size.
+
+    Every stratum is sampled at ``frac`` and rounds down on its own, so the
+    parts need not sum back to n. This is why the benchmark is documented as
+    99 reviews rather than 100.
+    """
+    frame = pd.DataFrame(
+        {
+            "review_id": [f"r{i}" for i in range(1000)],
+            "platform": ["zepto", "blinkit"] * 500,
+            "rating_bucket": (["negative"] * 7 + ["positive"] * 3) * 100,
+        }
+    )
+    sample = stratified_sample(frame, 100, seed=42)
+
+    assert len(sample) <= 100
+    assert len(sample) < len(frame)
+    # Whatever the size, stratification is intact: every stratum is represented.
+    assert set(sample["platform"]) == {"zepto", "blinkit"}
+    assert set(sample["rating_bucket"]) == {"negative", "positive"}

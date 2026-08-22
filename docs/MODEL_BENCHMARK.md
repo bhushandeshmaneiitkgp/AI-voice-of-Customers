@@ -13,7 +13,10 @@ measurement; this is that measurement.
 Both models received:
 
 - the **same 99 reviews** — a stratified sample by platform × rating bucket, so a
-  78%-negative corpus still exercises the strength vocabulary
+  78%-negative corpus still exercises the strength vocabulary. The flag was
+  `--sample 100`; proportional stratification samples each stratum at `frac` and
+  rounds down independently, so the strata sum to 99. Every figure below is over
+  99, and the run is described as a 99-review benchmark for that reason
 - the **same system prompt**, generated from `config/taxonomy.yaml`
 - the **same JSON schema**, with enums injected from the taxonomy
 - the **same three validators**: schema → taxonomy → grounding
@@ -155,6 +158,9 @@ mistake the qwen pricing error above already caused once.
 
 ### Reproduce
 
+`--sample 100` is what was run, and is kept verbatim; it selects the same 99 reviews
+under seed 42.
+
 ```bash
 VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100
 ```
@@ -165,3 +171,23 @@ VOC_ENRICHMENT_MODEL=qwen72b python scripts/04_run_enrichment.py --sample 100 --
 
 Per-model caches in `artifacts/enrichment_cache_<model>.json` keep runs isolated, so a
 re-run costs nothing and cannot cross-contaminate a comparison.
+
+### Re-benchmarking on fresh answers
+
+That last property is also a trap. Both caches are now populated, so re-running either
+command replays stored answers: coverage and agreement still hold, but `requests_made`,
+token counts, latency and cost describe the original run, not the new one. Any
+comparison against a *new* model would then be measuring one live model against one
+replay.
+
+`--no-cache` is the escape hatch. It makes every lookup miss, so each review costs a
+live request and the resulting metrics belong to that run:
+
+```bash
+VOC_ENRICHMENT_MODEL=llama70b python scripts/04_run_enrichment.py --sample 100 --no-cache
+```
+
+It bypasses cache **reads** only. Existing entries are still loaded and written back,
+so the file is added to and never cleared — a fresh measurement does not cost the work
+already paid for. The run report records `"cache_bypassed": true`, so a later reader can
+tell a fresh run from a replayed one without having to reconstruct the command.

@@ -26,7 +26,12 @@ import logging
 from typing import Any
 
 from config.settings import ModelProfile, Settings
-from voc.providers.base import CompletionResult, ProviderError, normalise_usage
+from voc.providers.base import (
+    CompletionResult,
+    ProviderError,
+    classify_error,
+    normalise_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +164,7 @@ class OpenAICompatibleProvider:
         try:
             completion = self._client.chat.completions.create(**params)
         except Exception as exc:  # noqa: BLE001 - surfaced as ProviderError
-            raise ProviderError(str(exc)) from exc
+            raise classify_error(exc) from exc
 
         if not completion.choices:
             raise ProviderError("Provider returned no choices")

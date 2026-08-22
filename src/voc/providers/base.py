@@ -26,8 +26,51 @@ from typing import Any, Protocol, runtime_checkable
 from config.settings import ModelProfile
 
 
+#: HTTP statuses that will never succeed on retry, because the problem is the
+#: account rather than the request: bad key, exhausted credit, forbidden model.
+#: Retrying these wastes time and, on a rate-limited account, makes things worse.
+NON_RETRYABLE_STATUSES: frozenset[int] = frozenset({400, 401, 402, 403, 404})
+
+
 class ProviderError(RuntimeError):
-    """A provider could not fulfil a request. Recorded, never silently swallowed."""
+    """A provider could not fulfil a request. Recorded, never silently swallowed.
+
+    ``retryable`` distinguishes a transient failure (timeout, 5xx, rate limit)
+    from a systemic one (no credit, bad key). The orchestrator retries the
+    first and aborts on the second -- without that distinction a single
+    account-level problem fans out into one doomed retry per review.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        if retryable is None:
+            retryable = status_code not in NON_RETRYABLE_STATUSES if status_code else True
+        self.retryable = retryable
+
+
+def classify_error(exc: Exception) -> ProviderError:
+    """Wrap a provider SDK exception, preserving whether a retry could help.
+
+    SDKs expose the status inconsistently, so it is read from an attribute
+    where available and otherwise scraped from the message. Defaulting to
+    retryable=True is the safe direction: a needless retry costs one request,
+    whereas wrongly aborting loses the run.
+    """
+    import re
+
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if not isinstance(status, int):
+        match = re.search(r"\b(4\d{2}|5\d{2})\b", str(exc))
+        status = int(match.group(1)) if match else None
+
+    return ProviderError(str(exc), status_code=status)
 
 
 @dataclass(frozen=True)

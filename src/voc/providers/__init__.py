@@ -11,9 +11,11 @@ from typing import Any
 from config.settings import ModelProfile, Settings
 from voc.providers.anthropic_provider import AnthropicProvider, resolve_effort
 from voc.providers.base import (
+    NON_RETRYABLE_STATUSES,
     CompletionResult,
     LLMProvider,
     ProviderError,
+    classify_error,
     normalise_usage,
 )
 from voc.providers.openai_compatible import (
@@ -27,7 +29,9 @@ __all__ = [
     "CompletionResult",
     "LLMProvider",
     "OpenAICompatibleProvider",
+    "NON_RETRYABLE_STATUSES",
     "ProviderError",
+    "classify_error",
     "get_provider",
     "normalise_usage",
     "resolve_effort",

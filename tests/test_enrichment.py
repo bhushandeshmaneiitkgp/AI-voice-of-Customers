@@ -13,6 +13,8 @@ group — each of which would produce a plausible, wrong dataset.
 from __future__ import annotations
 
 import json
+import re
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1108,3 +1110,190 @@ def test_stratified_sample_can_undershoot_the_requested_size() -> None:
     # Whatever the size, stratification is intact: every stratum is represented.
     assert set(sample["platform"]) == {"zepto", "blinkit"}
     assert set(sample["rating_bucket"]) == {"negative", "positive"}
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker: dispatch must stop, not just accounting
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_recording_provider(responder):
+    """Provider that records what was actually dispatched, per review.
+
+    Thread-safe, because what these tests measure is behaviour across a thread
+    pool. ``responder`` maps a review_id to a CompletionResult to return or an
+    exception to raise, so a group's outcome does not depend on the order the
+    pool happens to schedule it in.
+    """
+    provider = MagicMock()
+    provider.name = "mock"
+    provider.supports_batch = False
+    lock = threading.Lock()
+    seen = {"count": 0, "ids": []}
+
+    def complete(profile, system_prompt, user_message, schema, **kwargs):
+        review_id = re.search(r"review_id: (\S+)", user_message).group(1)
+        with lock:
+            seen["count"] += 1
+            seen["ids"].append(review_id)
+        outcome = responder(review_id)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    provider.complete.side_effect = complete
+    return provider, seen
+
+
+def _breaker_frame(size: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "review_id": [f"id{i:04d}" for i in range(size)],
+            "platform": ["zepto"] * size,
+            # Contains the evidence span used by _enrichment, so a success is
+            # fully grounded and nothing is dropped for the wrong reason.
+            "review_text": [
+                f"order {i} went wrong and the option not available" for i in range(size)
+            ],
+        }
+    )
+
+
+def _fatal_402() -> ProviderError:
+    return ProviderError("Error code: 402 - insufficient credits", status_code=402)
+
+
+def test_breaker_stops_dispatching_new_groups(taxonomy) -> None:
+    """Once tripped, the breaker must stop the requests, not just count them.
+
+    Submitting every group upfront made it advisory: the abort propagates out
+    of the pool's ``with`` block, whose ``__exit__`` runs shutdown(wait=True)
+    and drains the entire queue. A real full-corpus run tripped the breaker
+    after 5 failures and dispatched all 868 groups regardless.
+    """
+    size = 200
+    concurrency = 4
+    profile = load_model_registry()["opus"]
+    provider, seen = _dispatch_recording_provider(lambda _rid: _fatal_402())
+
+    with pytest.raises(RunAborted, match="non-retryable"):
+        enrich_sync(
+            _breaker_frame(size), taxonomy, profile, provider,
+            reviews_per_request=1, max_concurrency=concurrency,
+        )
+
+    # Only the window that was already open when it tripped may still be sent.
+    assert seen["count"] < size, "the breaker did not stop dispatch"
+    assert seen["count"] <= CONSECUTIVE_FAILURE_LIMIT + concurrency
+
+
+def test_breaker_stops_dispatch_at_every_concurrency(taxonomy) -> None:
+    """The bound is the window, so it must hold as the window grows."""
+    size = 300
+    profile = load_model_registry()["opus"]
+
+    for concurrency in (2, 8, 16):
+        provider, seen = _dispatch_recording_provider(lambda _rid: _fatal_402())
+        with pytest.raises(RunAborted):
+            enrich_sync(
+                _breaker_frame(size), taxonomy, profile, provider,
+                reviews_per_request=1, max_concurrency=concurrency,
+            )
+        assert seen["count"] <= CONSECUTIVE_FAILURE_LIMIT + concurrency, (
+            f"dispatched {seen['count']} groups at concurrency={concurrency}"
+        )
+
+
+def test_successes_before_the_abort_are_still_cached(taxonomy, tmp_path) -> None:
+    """Work that succeeded was billed, so the abort must not discard it.
+
+    A completed-but-unabsorbed success is money already spent. The real run
+    that exposed this returned one HTTP 200 while draining, and threw it away.
+    """
+    size = 40
+    concurrency = 2
+    profile = load_model_registry()["opus"]
+    # The first window is groups 0 and 1, so these two are dispatched before
+    # any failure can accumulate -- deterministic regardless of scheduling.
+    succeeding = {"id0000", "id0001"}
+
+    def responder(review_id: str):
+        if review_id in succeeding:
+            return CompletionResult(text=json.dumps({"results": [_enrichment(review_id)]}))
+        return _fatal_402()
+
+    provider, _seen = _dispatch_recording_provider(responder)
+    path = tmp_path / "cache.json"
+    cache = EnrichmentCache(path)
+
+    with pytest.raises(RunAborted):
+        enrich_sync(
+            _breaker_frame(size), taxonomy, profile, provider,
+            reviews_per_request=1, cache=cache, max_concurrency=concurrency,
+        )
+
+    cache.save()  # what the script's RunAborted handler does
+    reloaded = EnrichmentCache(path)
+    for review_id in sorted(succeeding):
+        assert reloaded.get(cache_key(review_id, profile)) is not None, (
+            f"{review_id} succeeded and was billed, but was not persisted"
+        )
+
+
+def test_serial_path_still_stops_at_the_limit(taxonomy) -> None:
+    """With no pool there is nothing in flight, so it stops exactly on time."""
+    profile = load_model_registry()["opus"]
+    provider, seen = _dispatch_recording_provider(lambda _rid: _fatal_402())
+
+    with pytest.raises(RunAborted):
+        enrich_sync(
+            _breaker_frame(50), taxonomy, profile, provider,
+            reviews_per_request=1, max_concurrency=1,
+        )
+
+    assert seen["count"] == CONSECUTIVE_FAILURE_LIMIT
+
+
+def test_windowed_dispatch_still_processes_every_group(taxonomy) -> None:
+    """The window must not drop groups: a healthy run still covers the corpus.
+
+    Guards the refactor itself -- an off-by-one in the refill would silently
+    shrink coverage rather than fail loudly.
+    """
+    size = 47  # deliberately not a multiple of the window
+    concurrency = 4
+    profile = load_model_registry()["opus"]
+    provider, seen = _dispatch_recording_provider(
+        lambda rid: CompletionResult(text=json.dumps({"results": [_enrichment(rid)]}))
+    )
+
+    result = enrich_sync(
+        _breaker_frame(size), taxonomy, profile, provider,
+        reviews_per_request=1, max_concurrency=concurrency,
+    )
+
+    assert seen["count"] == size
+    assert sorted(seen["ids"]) == sorted(f"id{i:04d}" for i in range(size))
+    assert len(result.enrichments) == size
+    assert result.requests_made == size
+
+
+def test_windowed_dispatch_reports_progress_for_every_group(taxonomy) -> None:
+    """Progress must still reach 100%, or a run looks stalled to the operator."""
+    size = 30
+    profile = load_model_registry()["opus"]
+    provider, _seen = _dispatch_recording_provider(
+        lambda rid: CompletionResult(text=json.dumps({"results": [_enrichment(rid)]}))
+    )
+    seen_progress: list[tuple[int, int]] = []
+
+    enrich_sync(
+        _breaker_frame(size), taxonomy, profile, provider,
+        reviews_per_request=1, max_concurrency=4,
+        progress=lambda done, total: seen_progress.append((done, total)),
+    )
+
+    assert len(seen_progress) == size
+    assert seen_progress[-1] == (size, size)
+    # Monotonic, and never claims more work than exists.
+    assert [done for done, _ in seen_progress] == sorted(done for done, _ in seen_progress)

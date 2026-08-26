@@ -28,7 +28,7 @@ import logging
 import os
 import time
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -480,15 +480,53 @@ def enrich_sync(
         # reasonable time: 924 serial requests is over an hour, eight at a time
         # is minutes. Requests are independent, so a thread pool is enough --
         # this is I/O-bound waiting, not computation.
+        #
+        # Groups are fed through a sliding window rather than submitted all at
+        # once. Submitting everything upfront made the breaker advisory: the
+        # abort propagates out of the ``with`` block, whose ``__exit__`` calls
+        # ``shutdown(wait=True)`` and drains every queued future -- so a run
+        # that had already decided to stop still sent the rest. A full-corpus
+        # run hit exactly that: the breaker tripped after 5 failures and all
+        # 868 groups were dispatched anyway. Only what is already in flight can
+        # still be sent, which is bounded by ``max_concurrency``.
         completed = 0
+        queued = iter(groups)
+        in_flight: set[Future] = set()
+        aborted: RunAborted | None = None
+
         with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-            futures = [pool.submit(run_group, group) for group in groups]
-            for future in as_completed(futures):
-                _, group_result, usage = future.result()
-                absorb(group_result, usage)
-                completed += 1
-                if progress:
-                    progress(completed, len(groups))
+
+            def fill_window() -> None:
+                """Refill the window, unless the breaker has already tripped."""
+                while aborted is None and len(in_flight) < max_concurrency:
+                    group = next(queued, None)
+                    if group is None:
+                        return
+                    in_flight.add(pool.submit(run_group, group))
+
+            fill_window()
+            while in_flight:
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                in_flight.difference_update(done)
+                for future in done:
+                    _, group_result, usage = future.result()
+                    completed += 1
+                    try:
+                        absorb(group_result, usage)
+                    except RunAborted as exc:
+                        # Stop feeding the pool, but keep draining what is
+                        # already running: those requests are billed either
+                        # way, so a success among them still belongs in the
+                        # cache. The first abort is the one that explains the
+                        # run, so later ones do not overwrite it.
+                        if aborted is None:
+                            aborted = exc
+                    if progress:
+                        progress(completed, len(groups))
+                fill_window()
+
+        if aborted is not None:
+            raise aborted
     else:
         for index, group in enumerate(groups, start=1):
             _, group_result, usage = run_group(group)

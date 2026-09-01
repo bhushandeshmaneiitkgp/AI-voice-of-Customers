@@ -40,7 +40,7 @@ from text alone.
 | Areas per review | 2.43 | 2.47 |
 | Output tokens per review | **251** | 881 |
 | Mean confidence | 0.868 | 0.918 |
-| **Cost, full 4,620 corpus** | **~$0.96** | ~$3.20 |
+| **Cost, full 4,620 corpus** | est. ~$0.96 → **actual $1.64** | est. ~$3.20 (unmeasured) |
 
 ### Validation issues
 
@@ -135,10 +135,50 @@ two-run total of $5.08.
 **99 reviews is a small sample.** Differences of a few percentage points here are not
 significant. The findings that carry weight are the large ones: 3.5× output verbosity,
 the 61% exact-match rate, and grounding being high for both rather than low.
+(Since resolved for llama70b: the full 4,620-run reproduced its grounding to within
+0.2 points — see *What the full run then measured*.)
 
 **No ground truth yet.** Agreement is not accuracy. Both models could be
 wrong in the same way, and neither number becomes an accuracy claim until the Phase 9
 hand-labelled gold set exists.
+
+---
+
+## What the full run then measured
+
+The benchmark picked llama70b; the full corpus was enriched with it on
+**2026-09-02**. The 99-review sample held up:
+
+| Metric | 99-review benchmark | Full corpus (4,620) |
+|---|---|---|
+| Coverage | 99/99 (100%) | **4,568/4,620 (98.9%)** |
+| Grounding (spans verbatim) | 98.2% | **98.4%** |
+| Fully-grounded reviews | 96.0% | 96.6% |
+| Areas per review | 2.43 | 2.36 |
+| Largest area | `customer_support` | `customer_support` (17.8%) |
+
+Coverage fell 1.1 points at 47× the scale and grounding did not move. The
+individual-retry path did the work again: 411 reviews went missing from group
+responses and **359 (87.3%) were recovered**, without which coverage would have
+been 90.0%.
+
+**The cost estimate was wrong, and not by rounding.** Estimated $0.79, billed
+**$1.6353** — 2.07×. About $0.11 of that is real extra tokens, because each of
+the 411 individual retries repeats the ~4,451-token system prompt. The other
+~$0.74 is a pricing error: `config/models.yaml` held **$0.10/$0.32 per MTok**,
+which is DeepInfra — the *cheapest* of the 13 provider endpoints OpenRouter
+routes this model across. The spread runs to $1.04/$1.04 at Together, roughly
+10×, and the blended rate actually charged was **$0.2462/MTok**.
+
+The registry now records the measured effective rate rather than the floor.
+Pinning a provider in the request would buy the floor price back, and is the
+obvious next lever if the corpus grows — but it trades cost against the
+availability that load-balancing provides, so it is a decision, not a fix.
+
+This is the same failure the qwen pricing note below already records once: a
+number in the registry that nobody had checked against an invoice. It has now
+happened twice, which makes it a property of the registry rather than an
+accident.
 
 ---
 

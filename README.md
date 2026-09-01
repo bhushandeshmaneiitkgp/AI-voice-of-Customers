@@ -339,16 +339,24 @@ identical for every provider. That is what makes a cross-provider benchmark
 meaningful: the only thing that varies between two runs is the model. Tests assert
 both adapters receive a byte-identical system prompt and JSON schema.
 
-Cost for the full 4,620-review corpus spans **62×**:
+Cost for the full 4,620-review corpus spans **144×**:
 
-| Model | Provider | Cost | Structured output |
+| Model | Provider | Est. cost | Structured output |
 |---|---|---|---|
 | `ollama` (local Llama 3.3) | local | **$0.00** | schema |
-| `llama70b` *(default)* | openrouter | **$0.90** | schema |
-| `gptoss` / `qwen72b` | openrouter | ~$1.05 | schema |
-| `deepseek` | openrouter | $2.58 | json only |
-| `haiku` | anthropic | $5.25 | schema |
+| `gptoss` | openrouter | **$0.39** | schema |
+| `llama70b` *(default)* | openrouter | **$1.51** — measured **$1.64** | schema |
+| `qwen72b` | openrouter | $2.11 | schema |
+| `deepseek` | openrouter | $2.41 | json only |
+| `haiku` | anthropic | $5.27 | schema |
 | `opus` (low → high effort) | anthropic | $26 → $56 | schema |
+
+`llama70b` is the only row with a *measured* number rather than an estimate: the
+full corpus was enriched on 2026-09-02 for **$1.64**. Treat the rest as estimates
+that have not yet met an invoice. An earlier version of this table said `$0.90`
+for `llama70b`, taken from the cheapest of the 13 provider endpoints OpenRouter
+routes across — a ~10× spread. Routing does not honour that floor, and the first
+full run cost 2.07× its estimate as a result.
 
 Two things degrade on open models, and the pipeline handles both rather than
 pretending otherwise. **Schema enforcement** varies — a model declared `json_object`

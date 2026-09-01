@@ -59,8 +59,13 @@ profiles:
     display_name: Llama 3.3 70B Instruct
     tier: open
     context_window: 131072
-    input_price_per_mtok: 0.10
-    output_price_per_mtok: 0.32
+    # Effective rate measured on the full-corpus run, NOT the floor. OpenRouter
+    # load-balances this model across 13 provider endpoints spanning roughly
+    # 10x: DeepInfra $0.10/$0.32 at the bottom, Together $1.04/$1.04 at the top.
+    # This entry previously held the DeepInfra floor, which under-predicted the
+    # real bill by 2.07x. Pin `provider` in the request to buy the floor price.
+    input_price_per_mtok: 0.18
+    output_price_per_mtok: 0.58
     batch_discount: 1.0
     structured_output: json_schema
     thinking_style: budget      # no adaptive thinking; effort is not a parameter
@@ -69,9 +74,12 @@ profiles:
     notes: >
       Default enrichment model, chosen on measured results rather than price.
       99-review benchmark (2026-08-21): 100% coverage, 98.2% of evidence spans
-      verified verbatim, 2.43 areas/review, 251 output tokens/review, ~$0.96 for
-      the full 4,620 corpus. The concern that open models would paraphrase
-      instead of quoting did not materialise -- see docs/EVALUATION notes.
+      verified verbatim, 2.43 areas/review, 251 output tokens/review. The
+      concern that open models would paraphrase instead of quoting did not
+      materialise. FULL CORPUS (2026-09-02): 4,568/4,620 enriched (98.9%),
+      98.4% grounding, 2.36 areas/review, 1,279 requests, actual spend $1.64 --
+      against a $0.79 estimate, because the price above was the cheapest
+      provider rather than the blended rate routing actually delivers.
 
   qwen72b:
     provider: openrouter
@@ -123,7 +131,7 @@ profiles:
     display_name: gpt-oss 120B
     tier: open
     context_window: 131072
-    input_price_per_mtok: 0.03
+    input_price_per_mtok: 0.04    # verified against the live catalogue 2026-09-02
     output_price_per_mtok: 0.17
     batch_discount: 1.0
     structured_output: json_schema
@@ -131,7 +139,7 @@ profiles:
     supports_effort: false
     default_effort: null
     notes: >
-      Cheapest option in the registry at $0.03/$0.17 per MTok -- below llama70b.
+      Cheapest option in the registry at $0.04/$0.17 per MTok -- below llama70b.
       NOT yet benchmarked, so it is not the default: choosing it on price alone
       would repeat the mistake the qwen note above records. Worth a run on the
       same 99-review sample before the next full pass.
@@ -157,8 +165,10 @@ profiles:
       instead: openai/gpt-oss-20b". OpenRouter is withdrawing the :free variant;
       it appeared in the catalogue with pricing 0.0 but is refused at call time,
       so catalogue presence is not availability. Zero usable enrichments.
-      Use openai/gpt-oss-20b (paid, ~$0.03/$0.17 per MTok) instead, or llama70b
-      which is already benchmarked.
+      Use openai/gpt-oss-20b (paid, ~$0.04/$0.17 per MTok) instead, or llama70b
+      which is already benchmarked. As of 2026-09-02 the slug has been removed
+      from the OpenRouter catalogue altogether, so it no longer even resolves --
+      the withdrawal this entry predicted has completed.
 
   # ===========================================================================
   # Anthropic -- retained as the frontier control arm for EVALUATION.md

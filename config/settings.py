@@ -68,6 +68,14 @@ class Paths:
         """Per-model response cache, so a model benchmark cannot cross-contaminate."""
         return cls.artifacts_dir / f"enrichment_cache_{model_key}.json"
 
+    # ---- Phase 4: embeddings, index, clusters, pain points ----
+    embeddings = PROJECT_ROOT / "artifacts" / "embeddings.npz"
+    faiss_index = PROJECT_ROOT / "artifacts" / "reviews.faiss"
+    review_clusters = PROJECT_ROOT / "data" / "processed" / "review_clusters.parquet"
+    cluster_summary = PROJECT_ROOT / "data" / "processed" / "cluster_summary.parquet"
+    pain_points = PROJECT_ROOT / "data" / "processed" / "pain_points.parquet"
+    pain_point_report = PROJECT_ROOT / "reports" / "PAIN_POINTS.md"
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"
@@ -340,6 +348,29 @@ class Settings(BaseSettings):
 
     # Reviews shorter than this after normalisation are unusable.
     min_review_chars: int = 10
+
+    # --- Embeddings and clustering (Phase 4) -------------------------------
+    # Local sentence-transformers, not an API. Embedding 4,620 reviews through
+    # a hosted endpoint would add a per-run cost and a network dependency to
+    # something that is deterministic and runs in under a minute on CPU.
+    # all-MiniLM-L6-v2: 384 dims, ~90MB, and the standard baseline for short
+    # English text. Overridable because the right model is an empirical
+    # question, exactly as it is for enrichment.
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_batch_size: int = 64
+
+    # Candidate cluster counts to score. Silhouette picks between them rather
+    # than a k chosen by eye, so the number is defensible and reproducible.
+    # Lower bound is 3, not the observed optimum of 6: a range that starts at
+    # the answer cannot demonstrate it is the answer. Silhouette on this corpus
+    # rises 0.102 (k=3) to 0.123 (k=6) and falls after, so the peak is bracketed
+    # on both sides and the choice is the data's rather than the default's.
+    cluster_k_min: int = 3
+    cluster_k_max: int = 24
+
+    # A pain point below this many reviews is not a pattern, it is an anecdote.
+    # Reporting singletons would bury the real signal under noise.
+    min_pain_point_volume: int = 15
 
     # --- Dev conveniences --------------------------------------------------
     sample_limit: int = 0  # 0 = process everything

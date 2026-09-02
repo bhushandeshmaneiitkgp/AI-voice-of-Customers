@@ -48,7 +48,14 @@ sentence-transformers>=3.0.0
 # would save microseconds and cost exactness.
 faiss-cpu>=1.9.0
 
+# --- Orchestration (Phase 6) ---
+# The pipeline up to Phase 5 is a straight line, and a line needs no framework.
+# Phase 6 is the first stage with a decision in it: when a hypothesis cites a
+# review it was never shown, retrieve wider evidence and retry. Expressing that
+# cycle as nested retry logic is how retry budgets get lost.
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
 # =============================================================================
-# Added in Phase 6 (orchestration):      langgraph, langchain-core
 # Added in Phase 8 (UI):                 streamlit
 # =============================================================================

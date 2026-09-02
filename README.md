@@ -86,8 +86,8 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 3b | Taxonomy discovery | `src/voc/taxonomy.py`, `discovery.py` | ✅ Phase 2 |
 | 3c | EDA + figures | `src/voc/eda.py`, `plots.py` | ✅ Phase 2 |
 | 4 | AI enrichment | `src/voc/enrich.py`, `llm.py`, `prompts.py` | ✅ Phase 3 |
-| 5 | Pain-point discovery | `src/voc/painpoints.py` | Phase 4 |
-| 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | Phase 4 |
+| 5 | Pain-point discovery | `src/voc/painpoints.py` | ✅ Phase 4 |
+| 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | ✅ Phase 4 |
 | 7 | Trend analysis | `src/voc/trends.py` | Phase 5 |
 | 8 | RAG evidence retrieval | `src/voc/retrieval.py` | Phase 6 |
 | 9 | Root-cause hypotheses | `src/voc/rootcause.py` | Phase 6 |
@@ -174,6 +174,33 @@ only: existing entries are kept and updated, never cleared.
 ```bash
 python scripts/04_run_enrichment.py --sample 20 --no-cache
 ```
+
+Phase 4 needs no API key — embeddings run locally on CPU. Install the extra
+dependencies first (`torch` from the CPU index is ~10× smaller than the default
+CUDA wheel and there is no GPU work here):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+```bash
+pip install sentence-transformers faiss-cpu
+```
+
+Then embed the corpus and build the index (~80s for 4,568 reviews):
+
+```bash
+python scripts/05_build_embeddings.py
+```
+
+Then cluster and score the pain points:
+
+```bash
+python scripts/06_discover_painpoints.py
+```
+
+That writes [`reports/PAIN_POINTS.md`](reports/PAIN_POINTS.md) — the ranked,
+evidence-backed brief that is the Phase 4 deliverable.
 
 Run the tests:
 
@@ -404,8 +431,11 @@ quickcommerce-voc-copilot/
 │   └── profiling.py           Layer 3
 ├── scripts/
 │   ├── 00_profile_data.py
-│   └── 01_build_clean.py
-├── tests/                     97 tests
+│   ├── 01_build_clean.py
+│   ├── ...
+│   ├── 05_build_embeddings.py   local vectors + FAISS index
+│   └── 06_discover_painpoints.py  clustering + scored pain points
+├── tests/                     374 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -445,7 +475,7 @@ quickcommerce-voc-copilot/
 | ✅ 1 | Scaffold, ingestion, cleaning, profiling, tests |
 | ✅ 2 | Taxonomy discovery + full EDA, figures, and product intelligence summary |
 | ✅ 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
-| 4 | Embeddings, FAISS, clustering, pain-point scoring |
+| ✅ 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | 5 | Trend analysis + competitive metrics |
 | 6 | RAG evidence retrieval + LangGraph orchestration |
 | 7 | Opportunities, RICE, experiment plans |

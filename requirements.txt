@@ -35,8 +35,20 @@ anthropic>=1.0.0
 # --- Tests ---
 pytest>=8.2.0
 
+# --- Embeddings and vector search (Phase 4) ---
+# Local, not an API. Embedding short English text does not need a hosted model,
+# and routing it through one would add a per-run cost and a network failure
+# mode to a step that is deterministic and takes ~80s on CPU.
+#
+# Install torch from the CPU index: the default PyPI wheel bundles CUDA and is
+# roughly 10x larger for no benefit here.
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers>=3.0.0
+# faiss-cpu: flat inner-product index. At 4,620 vectors an approximate index
+# would save microseconds and cost exactness.
+faiss-cpu>=1.9.0
+
 # =============================================================================
-# Added in Phase 4 (embeddings / RAG):   sentence-transformers, faiss-cpu
 # Added in Phase 6 (orchestration):      langgraph, langchain-core
 # Added in Phase 8 (UI):                 streamlit
 # =============================================================================

@@ -96,33 +96,33 @@ Verbatim spans, verified against the source text at enrichment time.
 
 > Customer support is unhelpful
 
-> What they say if you complaint that the product is good you have paid,,, we are not giving your money back
-
 > The Customer Support experience makes it even worse with only Chatbots and no real solution
 
-**2. `customer_support` / `no_response`** — 704 reviews, score 0.669
+> If i try to connect to Customer support still their is no help from their end
 
-> no solution even after multiple follow-up
+**2. `customer_support` / `no_response`** — 704 reviews, score 0.669
 
 > No customer support to deal directly .only email..that too 24 hrs waiting time
 
 > No customer support
 
+> no solution even after multiple follow-up
+
 **3. `refunds` / `refund_not_received`** — 348 reviews, score 0.534
+
+> still I didn't receive my money
 
 > no refund policy, will eat all your money
 
 > I didn't get my refund back
 
-> still I didn't receive my money
-
 **4. `order_lifecycle` / `unwanted_cancellation`** — 438 reviews, score 0.493
-
-> my order got cancelled heads-up more than once
 
 > my money was deducted but order not confirmed and cancelled
 
-> you all keep giving advertisements about delivering goods 10 minutes but in reality just keep cancelling orders
+> my order got cancelled heads-up more than once
+
+> they are cancelling it not only one time they are doing it every time
 
 **5. `refunds` / `partial_refund`** — 18 reviews, score 0.486
 
@@ -130,7 +130,7 @@ Verbatim spans, verified against the source text at enrichment time.
 
 > the refunded amount is less that of what I paid
 
-> I got a refund of 2 items and the main item was not refunded
+> refund was issued for only rs1072
 
 ---
 

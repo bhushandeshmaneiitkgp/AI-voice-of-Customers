@@ -25,6 +25,7 @@ from config.settings import Paths, load_model_registry
 from voc.enrich import (
     CONSECUTIVE_FAILURE_LIMIT,
     EnrichmentCache,
+    EnrichmentResult,
     RunAborted,
     build_run_report,
     cache_key,
@@ -1375,3 +1376,122 @@ def test_the_retry_rate_is_documented_from_a_real_run() -> None:
     source = inspect.getsource(llm_module)
     assert 0.0 < INDIVIDUAL_RETRY_RATE < 0.5
     assert "411" in source, "the measurement behind the constant must be recorded"
+
+
+# ---------------------------------------------------------------------------
+# Defects found by the Phase 9 evaluation
+#
+# Each of these is a bug the fault study or the dataset audit surfaced in a
+# shipped artefact. They are grouped because they share a cause: a check that
+# looked correct in isolation and disagreed with the rest of the pipeline.
+# ---------------------------------------------------------------------------
+
+
+def test_the_fallback_area_is_a_valid_answer_not_a_taxonomy_violation(taxonomy) -> None:
+    """`build_response_schema` offers the fallback area to the model, so
+    rejecting it here reported the schema's own design as a violation -- which is
+    what produced 71 `unknown_area` issues against a dataset containing none.
+    """
+    payload = _enrichment("r1")
+    payload["areas"][0]["product_area"] = taxonomy.fallback_area.id
+    payload["areas"][0]["issue_type"] = None
+    payload["areas"][0]["strength_type"] = None
+
+    issues = validate_against_taxonomy(ReviewEnrichment(**payload), taxonomy)
+    assert not [i for i in issues if i.kind in ("unknown_area", "missing_polarity")]
+
+
+def test_the_response_schema_and_the_validator_accept_the_same_areas(taxonomy) -> None:
+    """The two must not be able to drift apart again: one offers the vocabulary
+    and the other polices it, and a disagreement is invisible until a run.
+    """
+    from voc.enrichment_schemas import build_response_schema
+
+    offered = set(
+        build_response_schema(taxonomy)["schema"]["properties"]["results"]["items"]
+        ["properties"]["areas"]["items"]["properties"]["product_area"]["enum"]
+    )
+    for area_id in offered:
+        payload = _enrichment("r1")
+        payload["areas"][0]["product_area"] = area_id
+        issues = validate_against_taxonomy(ReviewEnrichment(**payload), taxonomy)
+        assert not [i for i in issues if i.kind == "unknown_area"], (
+            f"{area_id} is offered to the model but rejected by the validator"
+        )
+
+
+def test_a_label_with_no_polarity_is_not_recorded_as_praise(taxonomy, reviews) -> None:
+    """`polarity` was binary -- issue, else strength -- so 195 labels carrying
+    neither were filed as praise, 12% of everything the dataset called a
+    strength. Nothing downstream read the strength side, so no published figure
+    moved; the column was simply wrong.
+    """
+    payload = _enrichment(reviews["review_id"].iloc[0])
+    payload["areas"][0]["issue_type"] = None
+    payload["areas"][0]["strength_type"] = None
+
+    result = EnrichmentResult(enrichments=[ReviewEnrichment(**payload)])
+    _, labels = to_dataframes(result, reviews)
+
+    assert list(labels["polarity"]) == ["none"]
+
+
+def test_label_order_is_deterministic(taxonomy, reviews) -> None:
+    """Order otherwise followed whichever group finished first, so two runs over
+    identical inputs produced parquet differing in every row while carrying the
+    same data -- which makes a diff useless for spotting a real change."""
+    first = _enrichment(reviews["review_id"].iloc[0])
+    second = _enrichment(reviews["review_id"].iloc[1])
+    second["areas"][0]["product_area"] = "delivery_reliability"
+    second["areas"][0]["issue_type"] = "late_delivery"
+    second["areas"][0]["evidence_span"] = "fast delivery"
+
+    forwards = to_dataframes(
+        EnrichmentResult(enrichments=[ReviewEnrichment(**first), ReviewEnrichment(**second)]),
+        reviews,
+    )[1]
+    backwards = to_dataframes(
+        EnrichmentResult(enrichments=[ReviewEnrichment(**second), ReviewEnrichment(**first)]),
+        reviews,
+    )[1]
+
+    assert forwards.equals(backwards)
+
+
+def test_a_cached_enrichment_still_has_its_grounding_verified(tmp_path, taxonomy, reviews) -> None:
+    """A cache hit carried no grounding rate, so `to_dataframes` defaulted it to
+    a perfect 1.0 and a resumed run wrote unverified reviews into the dataset as
+    fully grounded. Grounding is a property of the text, not of the request that
+    fetched it, and re-checking costs a substring match.
+    """
+    profile = load_model_registry()["llama70b"]
+    cache = EnrichmentCache(tmp_path / "cache.json", autosave_every=0)
+
+    payload = _enrichment(reviews["review_id"].iloc[0])
+    payload["areas"][0]["evidence_span"] = "a quote that is nowhere in the review"
+    cache.put(cache_key(reviews["review_id"].iloc[0], profile), ReviewEnrichment(**payload))
+
+    provider = MagicMock()
+    provider.name = "test"
+    result = enrich_sync(
+        reviews.head(1), taxonomy, profile, provider, reviews_per_request=5, cache=cache
+    )
+
+    provider.complete.assert_not_called()
+    assert result.grounding_rates[reviews["review_id"].iloc[0]] == 0.0
+
+
+def test_the_cache_reports_what_it_stores_even_when_reads_are_bypassed(tmp_path) -> None:
+    """`--no-cache` makes lookups miss on purpose. "What has already been paid
+    for" is a different question and must still be answerable, or a rebuild
+    cannot tell which reviews it may safely re-materialise."""
+    profile = load_model_registry()["llama70b"]
+    key = cache_key("r1", profile)
+
+    cache = EnrichmentCache(tmp_path / "c.json", autosave_every=0)
+    cache.put(key, ReviewEnrichment(**_enrichment("r1")))
+    cache.save()
+
+    bypassed = EnrichmentCache(tmp_path / "c.json", read_through=False)
+    assert bypassed.get(key) is None
+    assert key in bypassed

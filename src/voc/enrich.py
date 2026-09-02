@@ -205,6 +205,15 @@ class EnrichmentCache:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def __contains__(self, key: str) -> bool:
+        """Whether an entry is *stored*, regardless of ``read_through``.
+
+        Deliberately not routed through ``get``: under ``--no-cache`` a lookup
+        is meant to miss, but "what has already been paid for" is a different
+        question and must still be answerable.
+        """
+        return key in self._entries
+
     @property
     def unsaved(self) -> int:
         return self._unsaved
@@ -394,6 +403,18 @@ def enrich_sync(
         if cached_rows:
             result.enrichments.extend(cached_rows)
             result.cache_hits = len(cached_rows)
+            # Grounding is a property of (enrichment, review text), not of the
+            # request that produced it, and re-checking it is a local substring
+            # match costing nothing. Without this a cache hit carried no rate at
+            # all and ``to_dataframes`` defaulted it to a perfect 1.0 -- so a
+            # resumed run wrote 284 unverified reviews into the dataset as
+            # fully grounded. The issues themselves are not re-raised: they were
+            # reported by the run that created the entry, and the run report
+            # describes requests made.
+            text_by_id = dict(zip(frame["review_id"], frame["review_text"]))
+            for hit in cached_rows:
+                _, rate = verify_grounding(hit, text_by_id.get(hit.review_id, ""))
+                result.grounding_rates[hit.review_id] = rate
             logger.info("Reused %d cached enrichment(s)", len(cached_rows))
         pending = frame[frame["review_id"].isin(uncached)]
 
@@ -729,7 +750,18 @@ def to_dataframes(
                     "product_area": label.product_area,
                     "issue_type": label.issue_type,
                     "strength_type": label.strength_type,
-                    "polarity": "issue" if label.issue_type else "strength",
+                    # Three-valued, not binary. A label carrying neither an
+                    # issue nor a strength is not praise, and the previous
+                    # ``else "strength"`` silently filed 195 of them as praise --
+                    # 12% of everything the dataset called a strength. Nothing
+                    # downstream read the strength side, so no published number
+                    # moved, but the column was wrong and a future reader of it
+                    # would have had no way to tell.
+                    "polarity": (
+                        "issue" if label.issue_type
+                        else "strength" if label.strength_type
+                        else "none"
+                    ),
                     "evidence_span": label.evidence_span,
                     "confidence": label.confidence,
                 }
@@ -755,6 +787,17 @@ def to_dataframes(
             on="review_id",
             how="left",
         )
+        # Label order otherwise follows whichever group finished first, so two
+        # runs over identical inputs produce parquet files that differ in every
+        # row while carrying the same data -- which makes a diff useless for
+        # telling a real change from a reshuffle. Sorting costs nothing here
+        # and nothing downstream depends on the order: every consumer groups by
+        # review or by area.
+        labels = labels.sort_values(
+            ["review_id", "product_area", "issue_type", "strength_type"],
+            na_position="last",
+            kind="stable",
+        ).reset_index(drop=True)
 
     return reviews, labels
 

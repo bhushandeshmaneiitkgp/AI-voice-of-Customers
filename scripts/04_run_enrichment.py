@@ -49,6 +49,7 @@ from config.settings import Paths, get_settings, load_model_registry
 from voc.enrich import (
     EnrichmentCache,
     build_run_report,
+    cache_key,
     collect_batch_results,
     enrich_sync,
     RunAborted,
@@ -66,6 +67,26 @@ from voc.llm import (
 from voc.providers import ProviderError
 from voc.prompts import build_system_prompt
 from voc.taxonomy import get_taxonomy
+
+
+class RefusingProvider:
+    """Satisfies the provider protocol and refuses to make a request.
+
+    Used by ``--from-cache``, where the guarantee wanted is not "we intend not
+    to call the API" but "calling it is impossible". A flag that promises to
+    spend nothing should be enforced by something other than the reader's trust
+    in the surrounding code.
+    """
+
+    name = "none"
+    supports_batch = False
+
+    def complete(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        raise ProviderError(
+            "--from-cache reached a review with no stored enrichment. Refusing to "
+            "spend; the cache filter is wrong and the run stopped rather than bill.",
+            retryable=False,
+        )
 
 
 def main() -> int:
@@ -93,6 +114,10 @@ def main() -> int:
         "--no-cache", action="store_true",
         help="Ignore cached answers and call the API for every review. Results are still "
              "written to the cache; existing entries are kept, never deleted.",
+    )
+    parser.add_argument(
+        "--from-cache", action="store_true",
+        help="Rebuild the dataset from cached enrichments only. Never calls the API.",
     )
     parser.add_argument("--yes", action="store_true", help="Skip the cost confirmation prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Estimate cost and exit without calling the API.")
@@ -136,6 +161,28 @@ def main() -> int:
             dict(frame["rating_bucket"].value_counts()),
         )
 
+    if args.from_cache:
+        # Re-materialise the parquet outputs from answers already paid for.
+        # Needed whenever the *flattening* changes rather than the model -- a
+        # fixed polarity column, a new derived field -- where re-running the
+        # enrichment would spend money to obtain answers already on disk, and
+        # would also re-attempt the reviews that failed last time, silently
+        # changing coverage and every figure derived from it.
+        if args.no_cache:
+            log.error("--from-cache and --no-cache are contradictory.")
+            return 1
+        stored = EnrichmentCache(Paths.enrichment_cache(profile.key))
+        before = len(frame)
+        frame = frame[frame["review_id"].map(lambda r: cache_key(r, profile) in stored)]
+        log.info(
+            "Rebuilding from cache: %d of %d reviews have a stored enrichment. "
+            "The remaining %d are left exactly as they were.",
+            len(frame), before, before - len(frame),
+        )
+        if frame.empty:
+            log.error("No cached enrichments for %s; nothing to rebuild.", profile.key)
+            return 1
+
     system_prompt = build_system_prompt(taxonomy)
     effort = resolve_effort(profile, args.effort)
     estimate = estimate_cost(
@@ -158,12 +205,17 @@ def main() -> int:
     batch_note = "Batch API" if (args.batch and profile.provider == "anthropic") else f"live, {args.concurrency} concurrent"
     print(f"  Transport        : {batch_note}")
     print(f"  Cache            : "
-          + ("BYPASSED (--no-cache) — every review billed live; existing entries kept"
+          + ("REBUILD ONLY (--from-cache) — every review is already stored"
+             if args.from_cache else
+             "BYPASSED (--no-cache) — every review billed live; existing entries kept"
              if args.no_cache else "read-through — cached reviews cost nothing"))
     print("-" * 78)
-    print(f"  ESTIMATE         : {estimate.summary(args.batch)}")
-    print(f"  (standard ${estimate.usd_standard:,.2f} / batch ${estimate.usd_batch:,.2f}. "
-          "Includes estimated thinking tokens; excludes prompt-cache savings.)")
+    if args.from_cache:
+        print("  ESTIMATE         : $0.00 — no request can be made on this path")
+    else:
+        print(f"  ESTIMATE         : {estimate.summary(args.batch)}")
+        print(f"  (standard ${estimate.usd_standard:,.2f} / batch ${estimate.usd_batch:,.2f}. "
+              "Includes estimated thinking tokens; excludes prompt-cache savings.)")
 
     if args.dry_run:
         print("-" * 78)
@@ -198,7 +250,7 @@ def main() -> int:
         log.info("Dry run - no API calls made.")
         return 0
 
-    if not args.yes:
+    if not args.yes and not args.from_cache:
         try:
             if input("Proceed and spend this? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Aborted.")
@@ -207,11 +259,18 @@ def main() -> int:
             log.error("No TTY for confirmation. Re-run with --yes to proceed non-interactively.")
             return 1
 
-    try:
-        provider = create_provider(profile, settings)
-    except (RuntimeError, ProviderError) as exc:
-        log.error("%s", exc)
-        return 1
+    if args.from_cache:
+        # A provider that cannot spend, rather than a promise not to. The frame
+        # has already been narrowed to cached reviews so nothing should reach
+        # this, and if the narrowing is ever wrong the run fails loudly instead
+        # of quietly billing.
+        provider = RefusingProvider()
+    else:
+        try:
+            provider = create_provider(profile, settings)
+        except (RuntimeError, ProviderError) as exc:
+            log.error("%s", exc)
+            return 1
 
     # A read bypass, not a reset: the file is still loaded and still written,
     # so a fresh benchmark costs its own requests without discarding anyone
@@ -283,7 +342,22 @@ def main() -> int:
         reviews.to_parquet(Paths.enriched_reviews, index=False)
     if not labels.empty:
         labels.to_parquet(Paths.enriched_labels, index=False)
-    Paths.enrichment_report.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    if args.from_cache:
+        # The run report describes an API run: coverage against what was
+        # *requested*, grounding measured at parse time, issues raised by the
+        # validators. A rebuild made no requests and re-validated nothing, so
+        # writing one here would replace a true record with a report claiming
+        # 100% coverage and no grounding measurement at all.
+        log.info(
+            "Left %s untouched -- it records the run that produced these answers, "
+            "which this rebuild did not repeat.",
+            Paths.enrichment_report.name,
+        )
+    else:
+        Paths.enrichment_report.write_text(
+            json.dumps(report, indent=2, default=str), encoding="utf-8"
+        )
 
     grounding = report["grounding"]
     print()

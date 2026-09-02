@@ -319,9 +319,18 @@ def test_loader_rejects_area_with_unknown_domain(tmp_path) -> None:
 
 
 def _project_python_files() -> list:
+    """Every hand-written module in the project.
+
+    ``app`` and ``evaluation`` were added in Phases 8 and 9. The guarantee below
+    is only worth as much as its coverage, and an architecture test that quietly
+    stops at the two oldest directories provides confidence rather than
+    enforcement.
+    """
     files = []
-    for folder in ("src", "scripts"):
-        files.extend((Paths.root / folder).rglob("*.py"))
+    for folder in ("src", "scripts", "app", "evaluation"):
+        directory = Paths.root / folder
+        if directory.exists():
+            files.extend(directory.rglob("*.py"))
     return files
 
 

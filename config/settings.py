@@ -83,6 +83,10 @@ class Paths:
     monthly_rates = PROJECT_ROOT / "data" / "processed" / "monthly_rates.parquet"
     competitive_report = PROJECT_ROOT / "reports" / "COMPETITIVE.md"
 
+    # ---- Phase 6: retrieval and root-cause hypotheses ----
+    root_causes = PROJECT_ROOT / "data" / "processed" / "root_causes.parquet"
+    root_cause_report = PROJECT_ROOT / "reports" / "ROOT_CAUSES.md"
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"

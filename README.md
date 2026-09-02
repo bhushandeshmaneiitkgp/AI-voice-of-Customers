@@ -89,12 +89,12 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 5 | Pain-point discovery | `src/voc/painpoints.py` | ✅ Phase 4 |
 | 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | ✅ Phase 4 |
 | 7 | Trend analysis + competitive metrics | `src/voc/trends.py` | ✅ Phase 5 |
-| 8 | RAG evidence retrieval | `src/voc/retrieval.py` | Phase 6 |
-| 9 | Root-cause hypotheses | `src/voc/rootcause.py` | Phase 6 |
+| 8 | RAG evidence retrieval | `src/voc/retrieval.py` | ✅ Phase 6 |
+| 9 | Root-cause hypotheses | `src/voc/rootcause.py` | ✅ Phase 6 |
 | 10 | Opportunity generation | `src/voc/opportunities.py` | Phase 7 |
 | 11 | RICE prioritisation | `src/voc/rice.py` | Phase 7 |
 | 12 | Experiment plans | `src/voc/experiments.py` | Phase 7 |
-| 13 | LangGraph orchestration | `src/voc/graph/` | Phase 6 |
+| 13 | LangGraph orchestration | `src/voc/graph/` | ✅ Phase 6 |
 | 14 | Streamlit UI | `app/` | Phase 8 |
 | 15 | Evaluation | `evaluation/` | Phase 9 |
 
@@ -211,6 +211,18 @@ python scripts/07_analyse_trends.py
 That writes [`reports/COMPETITIVE.md`](reports/COMPETITIVE.md): per-platform
 rates with Wilson intervals, pairwise differences corrected for multiplicity,
 and an explicit refusal to report a trend on a three-month window.
+
+Phase 6 needs a synthesis model. The registry default is `opus`; with only an
+OpenRouter key set, point it at an open model (~$0.01 for ten pain points):
+
+```bash
+VOC_SYNTHESIS_MODEL=llama70b python scripts/08_root_cause.py --top 10
+```
+
+That writes [`reports/ROOT_CAUSES.md`](reports/ROOT_CAUSES.md): candidate
+mechanisms behind the top pain points, each carrying the check that would
+confirm or kill it. Every citation is verified against the reviews the model was
+actually shown — one citing anything else is rejected, not repaired.
 
 Run the tests:
 
@@ -445,8 +457,9 @@ quickcommerce-voc-copilot/
 │   ├── ...
 │   ├── 05_build_embeddings.py   local vectors + FAISS index
 │   ├── 06_discover_painpoints.py  clustering + scored pain points
-│   └── 07_analyse_trends.py     competitive metrics, tested
-├── tests/                     402 tests
+│   ├── 07_analyse_trends.py     competitive metrics, tested
+│   └── 08_root_cause.py         RAG + LangGraph hypotheses
+├── tests/                     440 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -488,7 +501,7 @@ quickcommerce-voc-copilot/
 | ✅ 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
 | ✅ 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | ✅ 5 | Trend analysis + competitive metrics |
-| 6 | RAG evidence retrieval + LangGraph orchestration |
+| ✅ 6 | RAG evidence retrieval + LangGraph orchestration |
 | 7 | Opportunities, RICE, experiment plans |
 | 8 | Streamlit dashboard |
 | 9 | Evaluation framework + model benchmark |

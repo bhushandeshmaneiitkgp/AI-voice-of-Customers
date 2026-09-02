@@ -87,6 +87,13 @@ class Paths:
     root_causes = PROJECT_ROOT / "data" / "processed" / "root_causes.parquet"
     root_cause_report = PROJECT_ROOT / "reports" / "ROOT_CAUSES.md"
 
+    # ---- Phase 7: opportunities, RICE, experiments ----
+    opportunities = PROJECT_ROOT / "data" / "processed" / "opportunities.parquet"
+    rice_scores = PROJECT_ROOT / "data" / "processed" / "rice_scores.parquet"
+    experiment_plans = PROJECT_ROOT / "data" / "processed" / "experiment_plans.parquet"
+    effort_template = PROJECT_ROOT / "data" / "processed" / "effort_template.csv"
+    roadmap_report = PROJECT_ROOT / "reports" / "ROADMAP.md"
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"

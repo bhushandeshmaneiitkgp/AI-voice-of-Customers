@@ -91,9 +91,9 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 7 | Trend analysis + competitive metrics | `src/voc/trends.py` | ✅ Phase 5 |
 | 8 | RAG evidence retrieval | `src/voc/retrieval.py` | ✅ Phase 6 |
 | 9 | Root-cause hypotheses | `src/voc/rootcause.py` | ✅ Phase 6 |
-| 10 | Opportunity generation | `src/voc/opportunities.py` | Phase 7 |
-| 11 | RICE prioritisation | `src/voc/rice.py` | Phase 7 |
-| 12 | Experiment plans | `src/voc/experiments.py` | Phase 7 |
+| 10 | Opportunity generation | `src/voc/opportunities.py` | ✅ Phase 7 |
+| 11 | RICE prioritisation | `src/voc/rice.py` | ✅ Phase 7 |
+| 12 | Experiment plans | `src/voc/experiments.py` | ✅ Phase 7 |
 | 13 | LangGraph orchestration | `src/voc/graph/` | ✅ Phase 6 |
 | 14 | Streamlit UI | `app/` | Phase 8 |
 | 15 | Evaluation | `evaluation/` | Phase 9 |
@@ -223,6 +223,23 @@ That writes [`reports/ROOT_CAUSES.md`](reports/ROOT_CAUSES.md): candidate
 mechanisms behind the top pain points, each carrying the check that would
 confirm or kill it. Every citation is verified against the reviews the model was
 actually shown — one citing anything else is rejected, not repaired.
+
+Finally, turn the diagnosis into scored work (Phase 7, ~$0.01):
+
+```bash
+VOC_SYNTHESIS_MODEL=llama70b python scripts/09_build_roadmap.py --top 10
+```
+
+That writes [`reports/ROADMAP.md`](reports/ROADMAP.md). **It will report RIC, not
+RICE** — reach, impact and confidence come from the corpus, but effort is a
+property of your codebase and no review contains it. To get a real ranking:
+
+```bash
+python scripts/09_build_roadmap.py --write-effort-template
+```
+
+Fill in `effort_person_weeks`, then re-run with
+`--effort data/processed/effort_template.csv`.
 
 Run the tests:
 
@@ -458,8 +475,9 @@ quickcommerce-voc-copilot/
 │   ├── 05_build_embeddings.py   local vectors + FAISS index
 │   ├── 06_discover_painpoints.py  clustering + scored pain points
 │   ├── 07_analyse_trends.py     competitive metrics, tested
-│   └── 08_root_cause.py         RAG + LangGraph hypotheses
-├── tests/                     440 tests
+│   ├── 08_root_cause.py         RAG + LangGraph hypotheses
+│   └── 09_build_roadmap.py      opportunities, RICE, experiments
+├── tests/                     483 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -502,7 +520,7 @@ quickcommerce-voc-copilot/
 | ✅ 4 | Embeddings, FAISS, clustering, pain-point scoring |
 | ✅ 5 | Trend analysis + competitive metrics |
 | ✅ 6 | RAG evidence retrieval + LangGraph orchestration |
-| 7 | Opportunities, RICE, experiment plans |
+| ✅ 7 | Opportunities, RICE, experiment plans |
 | 8 | Streamlit dashboard |
 | 9 | Evaluation framework + model benchmark |
 | 10 | `PRODUCT_REQUIREMENTS.md`, `EVALUATION.md`, screenshots |

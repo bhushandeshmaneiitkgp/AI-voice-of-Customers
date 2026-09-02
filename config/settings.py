@@ -76,6 +76,13 @@ class Paths:
     pain_points = PROJECT_ROOT / "data" / "processed" / "pain_points.parquet"
     pain_point_report = PROJECT_ROOT / "reports" / "PAIN_POINTS.md"
 
+    # ---- Phase 5: competitive metrics and trend ----
+    platform_metrics = PROJECT_ROOT / "data" / "processed" / "platform_metrics.parquet"
+    platform_comparisons = PROJECT_ROOT / "data" / "processed" / "platform_comparisons.parquet"
+    area_rates = PROJECT_ROOT / "data" / "processed" / "area_rates_by_platform.parquet"
+    monthly_rates = PROJECT_ROOT / "data" / "processed" / "monthly_rates.parquet"
+    competitive_report = PROJECT_ROOT / "reports" / "COMPETITIVE.md"
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"

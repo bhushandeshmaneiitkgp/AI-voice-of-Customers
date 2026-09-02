@@ -61,6 +61,17 @@ def max_tokens_for(reviews_per_request: int) -> int:
 # nothing.
 DEFAULT_REVIEWS_PER_REQUEST = 5
 
+#: Share of reviews needing an individual retry, measured on the full
+#: 4,620-review run: 411 of 4,336 uncached reviews were missing from their group
+#: response and re-sent alone (9.5%). Each retry carries the entire system
+#: prompt again for one review -- 411 of them added ~1.8M input tokens, which is
+#: why omitting them left the estimate 8% low even after the pricing was fixed.
+#:
+#: One model at one group size, so a planning figure rather than a constant of
+#: nature. It will drift with reviews_per_request, since bigger groups drop more
+#: reviews, and with any model that reconciles ids differently from llama70b.
+INDIVIDUAL_RETRY_RATE = 0.095
+
 #: Rough multipliers on billed output tokens by effort level. Thinking tokens
 #: are billed as output and dominate the bill at high effort, so an estimator
 #: that ignores them badly understates cost. Only applies to models that expose
@@ -111,10 +122,11 @@ def estimate_cost(
     avg_review_tokens: int = 90,
     avg_output_tokens_per_review: int = 260,
     effort: str | None = None,
+    retry_rate: float = INDIVIDUAL_RETRY_RATE,
 ) -> CostEstimate:
     """Estimate spend before committing to a run.
 
-    Two opposing approximations, stated plainly rather than hidden:
+    Three approximations, stated plainly rather than hidden:
 
     * **Ignores prompt-cache savings**, which pushes the estimate UP. The
       taxonomy prefix is ~4,400 tokens and repeats on every request, so real
@@ -123,17 +135,37 @@ def estimate_cost(
       billed as output and dominate the bill on models that think. Without it
       the estimate would be roughly 3x too low on a frontier model at high
       effort.
+    * **Models the individual-retry path**, which is mostly input cost: a
+      review the model skipped in a group is re-sent alone, carrying the whole
+      system prompt again for one review. Omitting this left the full-corpus
+      estimate 8% low even after the pricing error was corrected.
 
     Treat the result as a planning figure; the run report records actual spend.
     """
-    requests = max(1, -(-n_reviews // reviews_per_request))  # ceiling division
+    if not 0.0 <= retry_rate < 1.0:
+        raise ValueError(f"retry_rate must be in [0, 1), got {retry_rate}")
+
+    group_requests = max(1, -(-n_reviews // reviews_per_request))  # ceiling division
     system_tokens = len(system_prompt) // 4  # ~4 chars/token for English
 
-    input_tokens = requests * system_tokens + n_reviews * avg_review_tokens
+    # Retries are one review per request, so each costs a full system prompt --
+    # which is why they matter out of proportion to their share of reviews.
+    retried_reviews = int(round(n_reviews * retry_rate))
+    requests = group_requests + retried_reviews
+
+    input_tokens = (
+        group_requests * system_tokens
+        + n_reviews * avg_review_tokens
+        + retried_reviews * (system_tokens + avg_review_tokens)
+    )
 
     chosen_effort = resolve_effort(profile, effort)
     multiplier = EFFORT_OUTPUT_MULTIPLIER.get(chosen_effort or "", 1.0)
-    output_tokens = int(n_reviews * avg_output_tokens_per_review * multiplier)
+    # A retried review is answered twice: once in the group (badly, or not at
+    # all) and once alone. Only the second is kept, but both bill.
+    output_tokens = int(
+        (n_reviews + retried_reviews) * avg_output_tokens_per_review * multiplier
+    )
 
     return CostEstimate(
         requests=requests,

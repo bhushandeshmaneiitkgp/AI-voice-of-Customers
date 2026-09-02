@@ -170,6 +170,12 @@ which is DeepInfra — the *cheapest* of the 13 provider endpoints OpenRouter
 routes this model across. The spread runs to $1.04/$1.04 at Together, roughly
 10×, and the blended rate actually charged was **$0.2462/MTok**.
 
+The estimator was also only counting group requests. The run made **1,279**
+where it predicted 868, because 411 reviews were re-sent individually and each
+retry carries the whole ~4,451-token system prompt for one review. It now models
+that path: request count reproduces to within one, and the estimate errs ~11%
+high rather than 13% low — the safe direction for a prompt that asks to spend.
+
 The registry now records the measured effective rate rather than the floor.
 Pinning a provider in the request would buy the floor price back, and is the
 obvious next lever if the corpus grows — but it trades cost against the

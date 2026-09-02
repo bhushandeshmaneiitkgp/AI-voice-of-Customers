@@ -1297,3 +1297,81 @@ def test_windowed_dispatch_reports_progress_for_every_group(taxonomy) -> None:
     assert seen_progress[-1] == (size, size)
     # Monotonic, and never claims more work than exists.
     assert [done for done, _ in seen_progress] == sorted(done for done, _ in seen_progress)
+
+
+# ---------------------------------------------------------------------------
+# Cost estimation: the retry path
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_counts_individual_retries_as_requests(taxonomy) -> None:
+    """The full-corpus run made 1,279 requests where the estimate said 868.
+
+    Reviews missing from a group are re-sent one at a time, and an estimate
+    that models only the group requests understates the run by that whole
+    second pass.
+    """
+    from voc.llm import INDIVIDUAL_RETRY_RATE
+
+    profile = load_model_registry()["llama70b"]
+    prompt = build_system_prompt(taxonomy)
+
+    grouped_only = estimate_cost(profile, 4336, prompt, 5, retry_rate=0.0)
+    with_retries = estimate_cost(profile, 4336, prompt, 5)
+
+    assert grouped_only.requests == 868
+    # 868 group requests plus one request per retried review.
+    assert with_retries.requests == 868 + round(4336 * INDIVIDUAL_RETRY_RATE)
+
+
+def test_the_estimate_reproduces_the_observed_request_count(taxonomy) -> None:
+    """Measured on the 2026-09-02 full run: 4,336 reviews cost 1,279 requests."""
+    profile = load_model_registry()["llama70b"]
+    estimate = estimate_cost(profile, 4336, build_system_prompt(taxonomy), 5)
+
+    assert abs(estimate.requests - 1279) <= 10, estimate.requests
+
+
+def test_a_retry_carries_the_whole_system_prompt_again(taxonomy) -> None:
+    """One review per request is why retries cost out of proportion to volume."""
+    profile = load_model_registry()["llama70b"]
+    prompt = build_system_prompt(taxonomy)
+    system_tokens = len(prompt) // 4
+
+    without = estimate_cost(profile, 1000, prompt, 5, retry_rate=0.0)
+    with_one_in_ten = estimate_cost(profile, 1000, prompt, 5, retry_rate=0.1)
+
+    extra_input = with_one_in_ten.input_tokens - without.input_tokens
+    # 100 retried reviews, each paying a full system prompt plus its own text.
+    assert extra_input >= 100 * system_tokens
+
+
+def test_modelling_retries_only_ever_raises_the_estimate(taxonomy) -> None:
+    """Erring high is the safe direction for a prompt that asks to spend money."""
+    profile = load_model_registry()["llama70b"]
+    prompt = build_system_prompt(taxonomy)
+
+    for rate in (0.0, 0.05, 0.095, 0.2):
+        current = estimate_cost(profile, 2000, prompt, 5, retry_rate=rate)
+        baseline = estimate_cost(profile, 2000, prompt, 5, retry_rate=0.0)
+        assert current.usd_standard >= baseline.usd_standard
+
+
+def test_an_impossible_retry_rate_is_rejected(taxonomy) -> None:
+    profile = load_model_registry()["llama70b"]
+    prompt = build_system_prompt(taxonomy)
+
+    for bad in (-0.1, 1.0, 1.5):
+        with pytest.raises(ValueError, match="retry_rate"):
+            estimate_cost(profile, 100, prompt, 5, retry_rate=bad)
+
+
+def test_the_retry_rate_is_documented_from_a_real_run() -> None:
+    """A tuned fudge factor and a measured rate look identical in code."""
+    from voc.llm import INDIVIDUAL_RETRY_RATE
+    import voc.llm as llm_module
+    import inspect
+
+    source = inspect.getsource(llm_module)
+    assert 0.0 < INDIVIDUAL_RETRY_RATE < 0.5
+    assert "411" in source, "the measurement behind the constant must be recorded"

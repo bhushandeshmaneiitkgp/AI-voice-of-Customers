@@ -96,7 +96,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 12 | Experiment plans | `src/voc/experiments.py` | ✅ Phase 7 |
 | 13 | LangGraph orchestration | `src/voc/graph/` | ✅ Phase 6 |
 | 14 | Streamlit UI | `app/` | ✅ Phase 8 |
-| 15 | Evaluation | `evaluation/` | Phase 9 |
+| 15 | Evaluation | `evaluation/` | ✅ Phase 9 |
 
 ---
 
@@ -369,6 +369,61 @@ directions. A skipped review is retried individually; an id that was never reque
 is discarded. Without that check, one omission would silently shift every label in the
 group onto the wrong rows.
 
+**Those checks report; they do not gate.** A label that fails validation is recorded
+as an issue and written to the dataset anyway, because dropping a review over one
+misfiled label of three discards two good labels and a whole row of coverage. That is
+a defensible trade and it was never stated, so `evaluation/integrity.py` now counts
+what actually lands: **10,476 of 10,790 labels are fully valid**, and
+[`reports/EVALUATION.md`](reports/EVALUATION.md) names the rest.
+
+### Validation is itself measured
+
+A detector that never fires and a model that never errs produce the same run report.
+`evaluation/faults.py` tells them apart: it injects eleven classes of known fault into
+enrichments the pipeline already accepted, runs them back through
+`parse_and_validate` — the real function, not a copy — and measures the capture rate,
+with a false-positive control on untouched input.
+
+Three of those eleven are worth the trouble. A real issue type filed under the wrong
+parent passes every schema check. An answer echoing an id nobody requested would
+misalign the dataset rather than merely damage it. And a quote missing a single
+interior word carries no ellipsis to spot — only substring matching stands between it
+and the corpus.
+
+Running the study is also what surfaced two defects the run report had been showing
+all along without anyone being able to read them: the validator rejected the fallback
+area that its own response schema offers the model (71 phantom violations), and the
+`polarity` column was binary, filing 195 labels that carried neither an issue nor a
+strength as praise.
+
+### Agreement is not accuracy, and the code will not let them blur
+
+`evaluation/metrics.py` scores a candidate against a reference and does not know where
+the reference came from — because accuracy and inter-model agreement are the same
+arithmetic, and only provenance makes one an accuracy claim. Two models agreeing
+proves they share a bias.
+
+So the gold set is the only thing that can close it, and the apparatus around it is
+built to keep it honest rather than to produce a number: the sample is drawn under a
+fixed seed before anyone looks at it, the annotation sheet shows **no model
+prediction** (an annotator shown a plausible label agrees with it far more often than
+they would have chosen it), the random and disagreement strata are never pooled, and
+an annotation that fails taxonomy validation is rejected rather than scored as a model
+error.
+
+Until a person fills it in, `reports/EVALUATION.md` opens by saying no accuracy figure
+exists. Generating the reference with an LLM would produce one for free, and it would
+be measuring one model's agreement with another — which is section 4 of that report,
+and already there.
+
+```bash
+python scripts/10_build_goldset.py
+```
+
+```bash
+python scripts/11_run_evaluation.py
+```
+
 ### The corpus is configuration, not code
 
 Three things are properties of a *dataset* rather than of the pipeline, and all
@@ -477,7 +532,7 @@ quickcommerce-voc-copilot/
 │   ├── raw/reviews.csv        IMMUTABLE source
 │   ├── interim/               cleaned parquet + run reports  (gitignored)
 │   ├── processed/             analysis outputs               (gitignored)
-│   └── eval/                  gold labels (Phase 9)
+│   └── eval/                  gold labels — the one tracked derived dir
 ├── src/voc/
 │   ├── schemas.py             Pydantic contracts — the project's spine
 │   ├── ingest.py              Layer 1
@@ -491,11 +546,20 @@ quickcommerce-voc-copilot/
 │   ├── 06_discover_painpoints.py  clustering + scored pain points
 │   ├── 07_analyse_trends.py     competitive metrics, tested
 │   ├── 08_root_cause.py         RAG + LangGraph hypotheses
-│   └── 09_build_roadmap.py      opportunities, RICE, experiments
+│   ├── 09_build_roadmap.py      opportunities, RICE, experiments
+│   ├── 10_build_goldset.py      sample the reviews a human should label
+│   └── 11_run_evaluation.py     every study that needs no API call
 ├── app/
 │   ├── main.py               Streamlit pages (thin)
 │   └── loaders.py            artefact loading + formatting (tested)
-├── tests/                     514 tests
+├── evaluation/
+│   ├── metrics.py            P/R/F1, kappa, intervals — blind to the reference
+│   ├── goldset.py            sampling, template, validation, scoring
+│   ├── faults.py             error injection + validator capture rate
+│   ├── integrity.py          what the validators let through
+│   ├── agreement.py          model-vs-model, never called accuracy
+│   └── retrieval_eval.py     precision@k against the base rate
+├── tests/                     595 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -540,7 +604,7 @@ quickcommerce-voc-copilot/
 | ✅ 6 | RAG evidence retrieval + LangGraph orchestration |
 | ✅ 7 | Opportunities, RICE, experiment plans |
 | ✅ 8 | Streamlit dashboard |
-| 9 | Evaluation framework + model benchmark |
+| ✅ 9 | Evaluation framework, fault injection, gold-set apparatus |
 | 10 | `PRODUCT_REQUIREMENTS.md`, `EVALUATION.md`, screenshots |
 
 ---

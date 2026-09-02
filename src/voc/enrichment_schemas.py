@@ -124,11 +124,22 @@ def validate_against_taxonomy(
     """
     issues: list[ValidationIssue] = []
     known_areas = set(taxonomy.area_ids)
+    # The fallback area is offered to the model by ``build_response_schema`` and
+    # is a legitimate answer -- it exists for generic praise or criticism with no
+    # identifiable surface. Omitting it here made the validator report the
+    # schema's own design as a taxonomy violation, which is how a full run came
+    # to log 71 ``unknown_area`` issues against a dataset containing none.
+    fallback_area = taxonomy.fallback_area.id
 
     def add(kind: str, detail: str) -> None:
         issues.append(ValidationIssue(review_id=enrichment.review_id, kind=kind, detail=detail))
 
     for label in enrichment.areas:
+        if label.product_area == fallback_area:
+            # No sub-label vocabulary exists for the fallback, and by its own
+            # definition a review filed here has no specific surface to
+            # characterise. Demanding a polarity would force an invented one.
+            continue
         if label.product_area not in known_areas:
             add("unknown_area", f"{label.product_area!r} is not a product area")
             continue

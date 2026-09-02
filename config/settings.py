@@ -94,6 +94,20 @@ class Paths:
     effort_template = PROJECT_ROOT / "data" / "processed" / "effort_template.csv"
     roadmap_report = PROJECT_ROOT / "reports" / "ROADMAP.md"
 
+    # ---- Phase 9: evaluation ----
+    # The annotator-facing template and the provenance record are deliberately
+    # separate files. The template carries only what a human needs to label a
+    # review; the provenance carries which stratum it came from and under what
+    # seed. Merging them would put "the models disagreed here" in front of the
+    # annotator, and a gold set that knows where the hard cases are is no longer
+    # a blind reference.
+    gold_template = PROJECT_ROOT / "data" / "eval" / "gold_template.csv"
+    gold_labels = PROJECT_ROOT / "data" / "eval" / "gold_labels.csv"
+    gold_provenance = PROJECT_ROOT / "data" / "eval" / "gold_provenance.parquet"
+    gold_guide = PROJECT_ROOT / "data" / "eval" / "ANNOTATION_GUIDE.md"
+    evaluation_results = PROJECT_ROOT / "data" / "processed" / "evaluation_results.json"
+    evaluation_report = PROJECT_ROOT / "reports" / "EVALUATION.md"
+
     artifacts_dir = PROJECT_ROOT / "artifacts"
     reports_dir = PROJECT_ROOT / "reports"
     data_profile = PROJECT_ROOT / "reports" / "data_profile.md"
@@ -389,6 +403,33 @@ class Settings(BaseSettings):
     # A pain point below this many reviews is not a pattern, it is an anecdote.
     # Reporting singletons would bury the real signal under noise.
     min_pain_point_volume: int = 15
+
+    # --- Evaluation (Phase 9) ----------------------------------------------
+    # Two gold strata, scored separately and never pooled.
+    #
+    # The random stratum is the only one that can support a corpus-level
+    # accuracy claim, because it is the only one drawn without reference to
+    # what the models found difficult. 100 reviews puts the Wilson half-width
+    # at roughly +/-6 points near 90% accuracy -- coarse, but it is the size a
+    # single annotator can actually complete, and an interval that says so is
+    # better than a point estimate that does not.
+    gold_random_size: int = 100
+
+    # The disagreement stratum is where errors concentrate, so it finds failure
+    # modes per hour of labelling far faster. Its accuracy is biased downward by
+    # construction and must never be reported as the corpus figure.
+    gold_disagreement_size: int = 50
+
+    # Synthetic faults injected per fault kind when measuring what the
+    # validators actually catch. 200 puts the Wilson half-width near +/-3
+    # points at a 95% capture rate, which is tight enough to distinguish a
+    # detector that works from one that mostly works.
+    fault_samples_per_kind: int = 200
+
+    # Reviews retrieved per query in the retrieval evaluation. Matches the
+    # default the root-cause layer actually asks for, so the measurement
+    # describes the configuration in use rather than a favourable one.
+    retrieval_eval_k: int = 8
 
     # --- Dev conveniences --------------------------------------------------
     sample_limit: int = 0  # 0 = process everything

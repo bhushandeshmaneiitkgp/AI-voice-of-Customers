@@ -34,6 +34,8 @@ htmlcov/
 
 # ---- Derived data: reproducible from raw via the pipeline ----
 # Raw data IS committed (it is the immutable input, ~1.9MB).
+# data/eval/ is deliberately NOT here: once a person fills in gold_labels.csv it
+# is the one artefact in this repo that no amount of compute can regenerate.
 data/interim/
 data/processed/
 !data/**/.gitkeep

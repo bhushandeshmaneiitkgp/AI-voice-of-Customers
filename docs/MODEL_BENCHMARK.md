@@ -144,6 +144,45 @@ hand-labelled gold set exists.
 
 ---
 
+## The agreement table is now computed
+
+Every figure in *Model agreement* above was originally worked out by hand and typed
+into this file, which makes it unreproducible and unfalsifiable — the property this
+project spends its effort avoiding everywhere else. `evaluation/agreement.py` derives
+them from the two per-model caches instead:
+
+```bash
+python scripts/11_run_evaluation.py
+```
+
+It reproduces the hand-computed numbers exactly — 96.8% sentiment agreement, 58 of 95
+exact area-set matches — which is the outcome that makes the harness worth having,
+because a disagreement would have meant one of the two was wrong and nobody could have
+said which.
+
+It also adds the column this document was missing. Raw agreement on a corpus that is
+78% negative is inflated by the class balance, so the chance-corrected figure is the
+one to quote:
+
+| Field | Agreement | Majority baseline | Cohen's κ |
+|---|---|---|---|
+| `sentiment` | 96.8% | 71.6% | **0.928** |
+| `customer_intent` | 90.5% | 78.9% | 0.714 |
+| `support_escalation` | 89.5% | 67.4% | 0.779 |
+| `severity` | 62.5% | 41.2% | **0.425** |
+
+κ changes the reading of the last row. `severity` was never in the original table, and
+at 0.425 it is the weakest signal the enrichment produces — two models given identical
+text and an identical scale agree on how bad a problem is barely better than moderately.
+Severity feeds the pain-point score, so this is the input most worth spending gold
+labels on, and the disagreement stratum in `scripts/10_build_goldset.py` targets
+exactly these reviews.
+
+**37 of the 95 co-labelled reviews disagree on the product-area set.** That is where a
+limited annotation budget goes first.
+
+---
+
 ## What the full run then measured
 
 The benchmark picked llama70b; the full corpus was enriched with it on

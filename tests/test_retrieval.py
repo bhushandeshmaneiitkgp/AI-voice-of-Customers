@@ -500,3 +500,35 @@ def test_an_injected_encoder_is_never_replaced() -> None:
     retriever = Retriever(FakeIndex(vectors), reviews, "fake", encoder=injected)
 
     assert retriever.encoder is injected
+
+
+def test_product_areas_are_deduplicated() -> None:
+    """A review with two issue types in one area must list that area once.
+
+    Printed twice in the UI it reads as a data error rather than as two
+    distinct complaints in the same category.
+    """
+    reviews, vectors = _corpus()
+    labels = pd.DataFrame(
+        [("a1", "delivery_reliability"), ("a1", "delivery_reliability"),
+         ("a1", "customer_support")],
+        columns=["review_id", "product_area"],
+    )
+    retriever = Retriever(FakeIndex(vectors), reviews, "fake", labels,
+                          encoder=FakeEncoder({}, dims=3))
+
+    hit = next(h for h in retriever.search("q", k=4).hits if h.review_id == "a1")
+    assert hit.product_areas == ["delivery_reliability", "customer_support"]
+
+
+def test_area_filtering_still_works_after_deduplication() -> None:
+    reviews, vectors = _corpus()
+    labels = pd.DataFrame(
+        [("a1", "delivery_reliability"), ("a1", "delivery_reliability")],
+        columns=["review_id", "product_area"],
+    )
+    retriever = Retriever(FakeIndex(vectors), reviews, "fake", labels,
+                          encoder=FakeEncoder({}, dims=3))
+
+    result = retriever.search("q", k=4, product_area="delivery_reliability")
+    assert [h.review_id for h in result.hits] == ["a1"]

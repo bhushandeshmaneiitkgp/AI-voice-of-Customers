@@ -95,7 +95,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 11 | RICE prioritisation | `src/voc/rice.py` | ✅ Phase 7 |
 | 12 | Experiment plans | `src/voc/experiments.py` | ✅ Phase 7 |
 | 13 | LangGraph orchestration | `src/voc/graph/` | ✅ Phase 6 |
-| 14 | Streamlit UI | `app/` | Phase 8 |
+| 14 | Streamlit UI | `app/` | ✅ Phase 8 |
 | 15 | Evaluation | `evaluation/` | Phase 9 |
 
 ---
@@ -240,6 +240,21 @@ python scripts/09_build_roadmap.py --write-effort-template
 
 Fill in `effort_person_weeks`, then re-run with
 `--effort data/processed/effort_template.csv`.
+
+Then browse it all (Phase 8, no API key):
+
+```bash
+pip install streamlit
+```
+
+```bash
+streamlit run app/main.py
+```
+
+Seven pages: overview, pain points, competitive, themes, root causes, roadmap,
+and a semantic evidence explorer over the same index the root-cause layer uses.
+Any page whose inputs are missing prints the command that produces them rather
+than rendering an empty chart.
 
 Run the tests:
 
@@ -477,7 +492,10 @@ quickcommerce-voc-copilot/
 │   ├── 07_analyse_trends.py     competitive metrics, tested
 │   ├── 08_root_cause.py         RAG + LangGraph hypotheses
 │   └── 09_build_roadmap.py      opportunities, RICE, experiments
-├── tests/                     483 tests
+├── app/
+│   ├── main.py               Streamlit pages (thin)
+│   └── loaders.py            artefact loading + formatting (tested)
+├── tests/                     514 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -521,7 +539,7 @@ quickcommerce-voc-copilot/
 | ✅ 5 | Trend analysis + competitive metrics |
 | ✅ 6 | RAG evidence retrieval + LangGraph orchestration |
 | ✅ 7 | Opportunities, RICE, experiment plans |
-| 8 | Streamlit dashboard |
+| ✅ 8 | Streamlit dashboard |
 | 9 | Evaluation framework + model benchmark |
 | 10 | `PRODUCT_REQUIREMENTS.md`, `EVALUATION.md`, screenshots |
 

@@ -88,7 +88,7 @@ data/raw/reviews.csv          IMMUTABLE source, SHA-256 pinned
 | 4 | AI enrichment | `src/voc/enrich.py`, `llm.py`, `prompts.py` | ✅ Phase 3 |
 | 5 | Pain-point discovery | `src/voc/painpoints.py` | ✅ Phase 4 |
 | 6 | Embeddings + clustering | `src/voc/embed.py`, `cluster.py` | ✅ Phase 4 |
-| 7 | Trend analysis | `src/voc/trends.py` | Phase 5 |
+| 7 | Trend analysis + competitive metrics | `src/voc/trends.py` | ✅ Phase 5 |
 | 8 | RAG evidence retrieval | `src/voc/retrieval.py` | Phase 6 |
 | 9 | Root-cause hypotheses | `src/voc/rootcause.py` | Phase 6 |
 | 10 | Opportunity generation | `src/voc/opportunities.py` | Phase 7 |
@@ -201,6 +201,16 @@ python scripts/06_discover_painpoints.py
 
 That writes [`reports/PAIN_POINTS.md`](reports/PAIN_POINTS.md) — the ranked,
 evidence-backed brief that is the Phase 4 deliverable.
+
+Then the competitive comparison (Phase 5, no API key, seconds to run):
+
+```bash
+python scripts/07_analyse_trends.py
+```
+
+That writes [`reports/COMPETITIVE.md`](reports/COMPETITIVE.md): per-platform
+rates with Wilson intervals, pairwise differences corrected for multiplicity,
+and an explicit refusal to report a trend on a three-month window.
 
 Run the tests:
 
@@ -434,8 +444,9 @@ quickcommerce-voc-copilot/
 │   ├── 01_build_clean.py
 │   ├── ...
 │   ├── 05_build_embeddings.py   local vectors + FAISS index
-│   └── 06_discover_painpoints.py  clustering + scored pain points
-├── tests/                     374 tests
+│   ├── 06_discover_painpoints.py  clustering + scored pain points
+│   └── 07_analyse_trends.py     competitive metrics, tested
+├── tests/                     402 tests
 ├── reports/data_profile.md    generated
 └── requirements.txt
 ```
@@ -476,7 +487,7 @@ quickcommerce-voc-copilot/
 | ✅ 2 | Taxonomy discovery + full EDA, figures, and product intelligence summary |
 | ✅ 3 | Multi-label LLM enrichment (Pydantic-validated, Batch API) |
 | ✅ 4 | Embeddings, FAISS, clustering, pain-point scoring |
-| 5 | Trend analysis + competitive metrics |
+| ✅ 5 | Trend analysis + competitive metrics |
 | 6 | RAG evidence retrieval + LangGraph orchestration |
 | 7 | Opportunities, RICE, experiment plans |
 | 8 | Streamlit dashboard |

@@ -104,8 +104,14 @@ class Retriever:
         self._encoder = encoder
         self._areas: dict[str, list[str]] = {}
         if labels is not None and not labels.empty:
+            # De-duplicated: a review with two issue types in one area produces
+            # that area twice, which the UI then prints twice and which reads
+            # as a data error rather than as two distinct complaints.
+            # dict.fromkeys keeps first-seen order, so the listing stays stable.
             self._areas = (
-                labels.groupby("review_id")["product_area"].apply(list).to_dict()
+                labels.groupby("review_id")["product_area"]
+                .apply(lambda areas: list(dict.fromkeys(areas)))
+                .to_dict()
             )
 
     @property

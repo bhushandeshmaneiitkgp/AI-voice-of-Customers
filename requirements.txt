@@ -56,6 +56,8 @@ faiss-cpu>=1.9.0
 langgraph>=0.2.0
 langchain-core>=0.3.0
 
-# =============================================================================
-# Added in Phase 8 (UI):                 streamlit
-# =============================================================================
+# --- Dashboard (Phase 8) ---
+# The app file stays thin on purpose: everything that could be wrong lives in
+# app/loaders.py and is tested, because Streamlit itself is not where the bugs
+# are and rendering is expensive to assert on.
+streamlit>=1.40.0

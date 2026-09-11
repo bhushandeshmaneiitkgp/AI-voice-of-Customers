@@ -4,10 +4,11 @@ Turns 4,620 unstructured customer reviews from **Blinkit**, **Zepto**, and **Jio
 into evidence-backed product insights: recurring pain points, supporting evidence,
 product opportunities, RICE prioritisation, and experiment plans.
 
-> **Status: Phases 1–3 of 10 complete.** Data foundation, the corpus-derived
-> product taxonomy, full exploratory analysis, and the AI enrichment pipeline are
-> built and verified, with **291 passing tests**. RAG, LangGraph orchestration, and
-> the Streamlit UI are scheduled — see [Roadmap](#roadmap).
+> **Status: Phases 1–9 of 10 complete.** Data foundation, corpus-derived taxonomy,
+> exploratory analysis, AI enrichment, embeddings, RAG, LangGraph orchestration,
+> opportunity analysis, Streamlit dashboard, and evaluation framework are built
+> and verified, with **555 passing tests and 40 skipped**. Remaining Phase 10 items
+> are documentation polish and screenshots — see [Roadmap](#roadmap).
 >
 > Start here: [`docs/EDA_FINDINGS.md`](docs/EDA_FINDINGS.md) (product intelligence
 > summary) · [`docs/TAXONOMY.md`](docs/TAXONOMY.md) · [`docs/MODEL_BENCHMARK.md`](docs/MODEL_BENCHMARK.md)
